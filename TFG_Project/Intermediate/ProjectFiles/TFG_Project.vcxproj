@@ -252,6 +252,7 @@
     <None Include="..\..\TFG_Project.uproject"/>
     <None Include="..\..\Source\TFG_Project.Target.cs"/>
     <None Include="..\..\Source\TFG_ProjectEditor.Target.cs"/>
+    <None Include="..\..\.vsconfig"/>
     <None Include="..\..\Config\DefaultEditor.ini"/>
     <None Include="..\..\Config\DefaultEditorPerProjectUserSettings.ini"/>
     <None Include="..\..\Config\DefaultEngine.ini"/>

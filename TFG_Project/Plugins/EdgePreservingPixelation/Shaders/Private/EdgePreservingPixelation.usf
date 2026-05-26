@@ -1,0 +1,141 @@
+// EdgePreservingPixelation.usf
+// TFG: Pipeline de pixelacion en tiempo real con preservacion de bordes.
+// Fase 1: Esqueleto base — pass-through directo sin procesamiento.
+//
+// Compatible con UE5 5.5, Shader Model 5+ (D3D12 / Vulkan).
+// Punto de entrada del Compute Shader: MainCS
+//
+// Recursos declarados en este archivo:
+//   - SceneColor    : textura de color HDR de escena (entrada).
+//   - SceneDepth    : profundidad raw en espacio de dispositivo (entrada, reservada Fase 2).
+//   - SceneVelocity : buffer de velocidad por pixel en NDC (entrada, reservada Fase 3).
+//   - OutputTexture : textura de salida escritura aleatoria (UAV).
+//
+// El motor UE5 vincula automaticamente los recursos declarados aqui con los campos
+// de igual nombre en FEdgePreservingPixelationCS::FParameters (enlazado por nombre).
+//
+// El constant buffer es generado automaticamente por el sistema de reflection de UE5
+// a partir de los campos SHADER_PARAMETER() de FParameters. El programador debe
+// garantizar que el layout HLSL (orden y tipos de variables globales) sea identico
+// al layout del struct C++ para evitar desincronizacion de offsets.
+
+#include "/Engine/Public/Platform.ush"
+
+// =============================================================================
+// Recursos de entrada — Shader Resource Views (SRV)
+// Vinculados por RDG desde FParameters::SceneColor, SceneDepth, SceneVelocity.
+// =============================================================================
+
+// Color de escena HDR. Formato tipico: R11G11B10_FLOAT o RGBA16F.
+Texture2D          SceneColor;
+
+// Profundidad de escena en espacio de dispositivo (depth buffer raw).
+// Rango: [0,1] en D3D12 (depth reverso en UE5: 1.0=near, 0.0=far).
+// Requiere conversion con la matriz de proyeccion inversa para obtener profundidad lineal.
+// RESERVADO para Fase 2 (filtro de bordes y deteccion de discontinuidades de profundidad).
+Texture2D<float>   SceneDepth;
+
+// Buffer de velocidad por pixel. Almacena el desplazamiento de cada pixel entre frames
+// consecutivos en unidades de NDC (Normalized Device Coordinates) por frame.
+// Formato: R16G16_FLOAT. Necesario para reprojection en estabilizacion temporal.
+// RESERVADO para Fase 3 (acumulacion temporal y reduccion de aliasing temporal).
+Texture2D<float2>  SceneVelocity;
+
+// Sampler con filtrado bilineal y modo Clamp en todos los ejes.
+// Compartido por todos los accesos de textura del shader para minimizar el
+// uso de registros de sampler (limitados a 16 en SM5).
+SamplerState       LinearClampSampler;
+
+// =============================================================================
+// Recurso de salida — Unordered Access View (UAV)
+// Vinculado por RDG desde FParameters::OutputTexture.
+// =============================================================================
+
+// Textura de salida con acceso de escritura aleatoria. Formato: RGBA32F o RGBA16F.
+// El compute shader escribe directamente en esta textura sin blending.
+RWTexture2D<float4> OutputTexture;
+
+// =============================================================================
+// Constant buffer — generado por UE5 a partir de FParameters.
+// Layout debe coincidir byte a byte con el struct C++ (ver EdgePreservingPixelationShader.h).
+//
+// Registro 0 [bytes  0-15]: ViewRect
+// Registro 1 [bytes 16-31]: InverseViewSize | PixelSize | Padding0
+// Registro 2 [bytes 32-47]: TemporalJitterX | TemporalJitterY | FrameIndex | Padding1
+// =============================================================================
+
+// Region activa del viewport: [OffsetX, OffsetY, Width, Height] en pixeles.
+float4  ViewRect;
+
+// Inversa del tamano del render target: (1/RTWidth, 1/RTHeight).
+// Transforma coordenadas de pixel a UV normalizadas sobre el render target completo.
+float2  InverseViewSize;
+
+// Tamano del bloque de pixelacion en pixeles de pantalla.
+// Ejemplo: 4.0 produce bloques visibles de 4x4 pixeles.
+// RESERVADO para Fase 2 (cuantizacion de UV al centroide del bloque).
+float   PixelSize;
+
+// Relleno de alineacion — no se usa en el shader. Completa el Registro 1 a 16 bytes.
+float   Padding0;
+
+// Desplazamiento X del jitter sub-pixel (secuencia de Halton, base 2).
+// RESERVADO para Fase 3 (estabilizacion temporal).
+float   TemporalJitterX;
+
+// Desplazamiento Y del jitter sub-pixel (secuencia de Halton, base 3).
+// RESERVADO para Fase 3 (estabilizacion temporal).
+float   TemporalJitterY;
+
+// Indice del frame actual modulo la longitud de la secuencia de acumulacion.
+// RESERVADO para Fase 3 (gestion del historial de frames).
+float   FrameIndex;
+
+// Relleno de alineacion — no se usa en el shader. Completa el Registro 2 a 16 bytes.
+float   Padding1;
+
+// =============================================================================
+// Punto de entrada del Compute Shader
+// Grupo de hilos: 8x8 = 64 hilos por grupo (optimo para warp/wavefront de 32-64 hilos).
+// Los defines THREADGROUP_SIZE_X/Y se inyectan desde ModifyCompilationEnvironment.
+// =============================================================================
+
+[numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    // Coordenadas del pixel de salida en espacio de pantalla completa.
+    // DispatchThreadId.xy esta en espacio de viewport [0, Width-1] x [0, Height-1].
+    // Se suma el offset del viewport (ViewRect.xy) para obtener coordenadas de render target.
+    uint2 PixelCoord = DispatchThreadId.xy + uint2(ViewRect.xy);
+
+    // Descarte temprano de hilos fuera del viewport activo.
+    // Necesario porque el numero de grupos despachados se redondea hacia arriba
+    // al multiplo del tamano de grupo; los hilos sobrantes escribirian fuera de bounds.
+    if (PixelCoord.x >= (uint)(ViewRect.x + ViewRect.z) ||
+        PixelCoord.y >= (uint)(ViewRect.y + ViewRect.w))
+    {
+        return;
+    }
+
+    // UV normalizadas [0,1] del pixel actual sobre el render target completo.
+    // El offset +0.5 centra el muestreo en el centro geometrico del pixel (filtrado correcto).
+    float2 UV = (float2(PixelCoord) + 0.5f) * InverseViewSize;
+
+    // =========================================================================
+    // FASE 1: Pass-through directo.
+    // Se escribe el color de escena sin modificacion como verificacion del pipeline.
+    //
+    // Fase 2 implementara aqui:
+    //   - Cuantizacion de UV al centroide del bloque de pixelacion (PixelSize).
+    //   - Deteccion de bordes mediante operador Sobel sobre SceneDepth.
+    //   - Mezcla adaptativa segun gradiente de profundidad.
+    //
+    // Fase 3 implementara aqui:
+    //   - Reprojection con SceneVelocity para acumulacion temporal.
+    //   - Filtro bilateral temporal para reduccion de ghosting.
+    // =========================================================================
+
+    float4 Color = SceneColor.SampleLevel(LinearClampSampler, UV, 0.0f);
+
+    OutputTexture[PixelCoord] = Color;
+}

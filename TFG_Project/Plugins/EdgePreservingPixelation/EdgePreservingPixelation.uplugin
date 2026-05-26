@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "Edge Preserving Pixelation",
+	"Description": "Plugin nativo C++ para UE5 5.5. Inyecta un Global Shader via RDG que implementa pixelacion en tiempo real con preservacion de bordes y reduccion de aliasing.",
+	"Category": "Rendering",
+	"CreatedBy": "Manuel",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "EdgePreservingPixelation",
+			"Type": "Runtime",
+			"LoadingPhase": "PostConfigInit"
+		}
+	]
+}
