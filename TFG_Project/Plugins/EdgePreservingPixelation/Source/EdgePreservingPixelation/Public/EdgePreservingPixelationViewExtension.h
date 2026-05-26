@@ -8,10 +8,11 @@
 
 #include "CoreMinimal.h"
 #include "SceneViewExtension.h"
-#include "ScreenPass.h"            // FScreenPassTexture (tipo de retorno del callback)
 
-class FRDGBuilder;
-class FSceneView;
+// Declaraciones anticipadas: evita incluir ScreenPass.h (Renderer) en un header
+// público, lo que arrastraría CanvasTypes.h y corrompería el orden del PCH.
+// Las definiciones completas se incluyen únicamente en el .cpp.
+struct FScreenPassTexture;
 struct FPostProcessMaterialInputs;
 
 /**
@@ -62,8 +63,11 @@ public:
      * para ese pase; el renderer los ejecuta secuencialmente encadenando la salida de
      * uno como entrada del siguiente.
      */
+    // Firma actualizada a UE5.5: se añade const FSceneView& InView como segundo parámetro.
+    // La firma anterior (sin InView) está marcada como UE_DEPRECATED(5.5) en SceneViewExtension.h.
     virtual void SubscribeToPostProcessingPass(
-        EPostProcessingPass PassId,
+        EPostProcessingPass Pass,
+        const FSceneView& InView,
         FAfterPassCallbackDelegateArray& InOutPassCallbacks,
         bool bIsPassEnabled) override;
 

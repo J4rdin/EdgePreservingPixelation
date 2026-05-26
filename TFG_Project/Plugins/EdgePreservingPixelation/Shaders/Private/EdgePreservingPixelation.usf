@@ -172,5 +172,8 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     //     Reprojection con SceneVelocity + acumulacion con historial de frames.
     // =========================================================================
 
-    OutputTexture[PixelCoord] = Color;
+    // DEBUG TEMPORAL: tinte rojo para verificar que el compute shader se ejecuta.
+    // Si la imagen en PIE aparece con tinte rojo, el pase se está despachand correctamente.
+    // Revertir a "OutputTexture[PixelCoord] = Color;" una vez confirmado.
+    OutputTexture[PixelCoord] = float4(Color.rgb * 0.5f + float3(0.5f, 0.0f, 0.0f), Color.a);
 }

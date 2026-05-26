@@ -10,6 +10,13 @@ public class EdgePreservingPixelation : ModuleRules
         // Uso de PCH explicito para evitar contaminacion de includes entre modulos de render.
         PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
 
+        // Forzar el orden de includes de UE5.5 para este modulo.
+        // El proyecto base usa EngineIncludeOrderVersion.Unreal5_3 (BuildSettingsVersion.V5),
+        // que provoca que Engine/Engine.h (arrastrado por SceneViewExtensionContext.h) exponga
+        // TOptional antes de que este completamente definido, causando un cascade de errores.
+        // Restringir la correccion al modulo del plugin evita alterar el resto del proyecto.
+        IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_5;
+
         PublicDependencyModuleNames.AddRange(new string[]
         {
             "Core",

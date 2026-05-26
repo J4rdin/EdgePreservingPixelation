@@ -4,6 +4,7 @@
 #include "EdgePreservingPixelationViewExtension.h"
 #include "EdgePreservingPixelationShader.h"
 
+#include "ScreenPass.h"                              // FScreenPassTexture — incluido aquí, no en el .h público
 #include "PostProcess/PostProcessMaterialInputs.h"  // FPostProcessMaterialInputs, EPostProcessMaterialInput
 #include "RenderGraphUtils.h"                        // FComputeShaderUtils::AddPass, AddClearUAVPass
 #include "RenderGraphBuilder.h"                      // FRDGBuilder
@@ -35,14 +36,26 @@ FEdgePreservingPixelationViewExtension::FEdgePreservingPixelationViewExtension(
 // ---------------------------------------------------------------------------
 
 void FEdgePreservingPixelationViewExtension::SubscribeToPostProcessingPass(
-    EPostProcessingPass PassId,
+    EPostProcessingPass Pass,
+    const FSceneView& InView,
     FAfterPassCallbackDelegateArray& InOutPassCallbacks,
     bool bIsPassEnabled)
 {
+    // DIAG: confirmar que el renderer llama a esta función y con qué valor de Pass.
+    // Se loguea una única vez para evitar spam de frames.
+    static bool bLoggedSubscribe = false;
+    if (!bLoggedSubscribe)
+    {
+        bLoggedSubscribe = true;
+        UE_LOG(LogTemp, Warning,
+            TEXT("[EPP] SubscribeToPostProcessingPass — Pass=%d Tonemap=%d bIsPassEnabled=%d"),
+            (int32)Pass, (int32)EPostProcessingPass::Tonemap, bIsPassEnabled ? 1 : 0);
+    }
+
     // Registrar el callback únicamente para el pase Tonemap.
-    // El renderer llamará a esta función una vez por pase activo en el pipeline;
-    // ignoramos todos los PassId que no sean Tonemap.
-    if (PassId == EPostProcessingPass::Tonemap)
+    // El renderer llama a esta función una vez por pase activo del pipeline de post-proceso;
+    // ignoramos todos los valores de Pass que no sean Tonemap.
+    if (Pass == EPostProcessingPass::Tonemap)
     {
         InOutPassCallbacks.Add(FAfterPassCallbackDelegate::CreateRaw(
             this,
@@ -62,8 +75,28 @@ FScreenPassTexture FEdgePreservingPixelationViewExtension::PostProcessPass_Rende
 {
     check(IsInRenderingThread());
 
+    // DIAG: confirmar que el callback se ejecuta en el render thread.
+    static bool bLoggedCallback = false;
+    if (!bLoggedCallback)
+    {
+        bLoggedCallback = true;
+        UE_LOG(LogTemp, Warning, TEXT("[EPP] PostProcessPass_RenderThread: callback ACTIVO en render thread"));
+    }
+
     // Obtener la textura de color producida por el pase Tonemap (LDR, formato sRGB o similar).
     const FScreenPassTexture InputSceneColor(InOutInputs.GetInput(EPostProcessMaterialInput::SceneColor));
+
+    // DIAG: estado de las entradas (se loguea una única vez).
+    static bool bLoggedInputs = false;
+    if (!bLoggedInputs)
+    {
+        bLoggedInputs = true;
+        UE_LOG(LogTemp, Warning,
+            TEXT("[EPP] InputSceneColor.IsValid=%d  OverrideOutput.IsValid=%d"),
+            InputSceneColor.IsValid() ? 1 : 0,
+            InOutInputs.OverrideOutput.IsValid() ? 1 : 0);
+    }
+
     if (!InputSceneColor.IsValid())
     {
         return InputSceneColor;
@@ -80,10 +113,11 @@ FScreenPassTexture FEdgePreservingPixelationViewExtension::PostProcessPass_Rende
     }
 
     // -----------------------------------------------------------------------
-    // Textura de salida
-    // Mismas dimensiones y formato que la entrada; con TexCreate_UAV para permitir
-    // la escritura RWTexture2D desde el compute shader.
-    // TexCreate_ShaderResource: permite usar la salida como SRV en pases posteriores.
+    // Textura de salida intermedia
+    // UAV: necesario para la escritura RWTexture2D desde el compute shader.
+    // ShaderResource: permite leer la textura como SRV en pases posteriores.
+    // RenderTargetable: necesario para que el pipeline pueda usar la textura como
+    //   destino de rasterización en el blit final hacia el swapchain.
     // -----------------------------------------------------------------------
     const FIntPoint RTExtent = InputSceneColor.Texture->Desc.Extent;
 
@@ -91,7 +125,7 @@ FScreenPassTexture FEdgePreservingPixelationViewExtension::PostProcessPass_Rende
         RTExtent,
         InputSceneColor.Texture->Desc.Format,
         FClearValueBinding::Black,
-        TexCreate_UAV | TexCreate_ShaderResource
+        TexCreate_UAV | TexCreate_ShaderResource | TexCreate_RenderTargetable
     );
     FRDGTextureRef OutputTexture = GraphBuilder.CreateTexture(OutputDesc, TEXT("EPP_PixelatedOutput"));
 
@@ -130,7 +164,9 @@ FScreenPassTexture FEdgePreservingPixelationViewExtension::PostProcessPass_Rende
     // -----------------------------------------------------------------------
     // Parámetros del shader
     // -----------------------------------------------------------------------
-    const FIntRect ViewRect     = View.ViewRect;
+    // UnscaledViewRect: viewport en píxeles de pantalla antes de cualquier escala DPI.
+    // FSceneView no expone ViewRect directamente en UE5.5; el miembro correcto es UnscaledViewRect.
+    const FIntRect ViewRect     = View.UnscaledViewRect;
     const float    PixelSizeVal = FMath::Max(1.0f, CVarEPPPixelSize.GetValueOnRenderThread());
 
     FEdgePreservingPixelationCS::FParameters* Parameters =
@@ -192,7 +228,27 @@ FScreenPassTexture FEdgePreservingPixelationViewExtension::PostProcessPass_Rende
         FComputeShaderUtils::GetGroupCount(ViewportSize, FIntPoint(8, 8))
     );
 
+    // -----------------------------------------------------------------------
+    // Manejo del OverrideOutput
+    //
+    // En UE5.5, el pipeline puede pre-asignar una textura de destino final
+    // (p. ej. el backbuffer del swapchain) mediante InOutInputs.OverrideOutput.
+    // Si está presente, el engine espera que escribamos en ella; ignorarla haría
+    // que el pipeline mostrara el backbuffer original sin nuestro efecto.
+    //
+    // Flujo:
+    //   1. Compute shader escribe en OutputTexture (UAV).
+    //   2. Si OverrideOutput es válido, copiamos OutputTexture → OverrideOutput.
+    //   3. Devolvemos la textura final al pipeline.
+    // -----------------------------------------------------------------------
+    FRDGTextureRef FinalTexture = OutputTexture;
+    if (InOutInputs.OverrideOutput.IsValid())
+    {
+        FinalTexture = InOutInputs.OverrideOutput.Texture;
+        AddCopyTexturePass(GraphBuilder, OutputTexture, FinalTexture);
+    }
+
     // Devolver la textura de salida con el ViewRect original preservado.
     // El pipeline de post-proceso encadenará esta textura como entrada del siguiente pase.
-    return FScreenPassTexture(OutputTexture, InputSceneColor.ViewRect);
+    return FScreenPassTexture(FinalTexture, InputSceneColor.ViewRect);
 }
