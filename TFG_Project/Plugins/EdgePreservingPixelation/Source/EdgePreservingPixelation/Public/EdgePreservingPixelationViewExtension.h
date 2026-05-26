@@ -1,0 +1,85 @@
+// Copyright (c) 2025 Manuel. Todos los derechos reservados.
+// TFG: Plugin de pixelacion con preservacion de bordes.
+//
+// FSceneViewExtensionBase derivada que inyecta el pase de compute de pixelacion
+// en el pipeline de post-proceso de UE5 vía SubscribeToPostProcessingPass.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "SceneViewExtension.h"
+#include "ScreenPass.h"            // FScreenPassTexture (tipo de retorno del callback)
+
+class FRDGBuilder;
+class FSceneView;
+struct FPostProcessMaterialInputs;
+
+/**
+ * FEdgePreservingPixelationViewExtension
+ *
+ * Extensión de vista que inyecta un pase de compute shader en el pipeline de
+ * post-procesado de UE5 5.5 mediante el mecanismo de callback de FSceneViewExtensionBase.
+ *
+ * PUNTO DE INYECCION: EPostProcessingPass::Tonemap (posterior al tone-mapping).
+ *
+ * Justificación del punto de inyección (relevante para el TFG):
+ *   1. LDR post-tonemap: el color está en [0,1] tras la curva de respuesta del tono.
+ *      Operar en LDR evita que valores HDR extremos produzcan artefactos de color
+ *      en los bordes de bloque de la cuantización UV.
+ *   2. Posterior a TAA/TSR: el super-sampling temporal ya ha aportado estabilidad
+ *      sub-pixel a la imagen base, reduciendo el parpadeo del bloque sin coste adicional.
+ *   3. Anterior a FXAA/post-sharpening: FXAA suavizaría los bordes duros de los
+ *      bloques de pixelación, destruyendo la estética del efecto. Inyectando antes,
+ *      nos aseguramos de que nuestra lógica de preservación de bordes sea la última
+ *      etapa de anti-aliasing que actúa sobre la imagen.
+ *   4. SceneDepth y SceneVelocity permanecen válidos en este punto del frame,
+ *      lo que habilitará la detección de bordes y la estabilización temporal en
+ *      las fases posteriores sin necesidad de cambiar el punto de inyección.
+ *
+ * Ciclo de vida: la instancia es mantenida por un TSharedPtr en FEdgePreservingPixelationModule.
+ * FSceneViewExtensionBase la registra automáticamente en su constructor y la elimina
+ * del sistema de extensiones cuando el TSharedPtr es destruido en ShutdownModule().
+ */
+class EDGEPRESERVINGPIXELATION_API FEdgePreservingPixelationViewExtension
+    : public FSceneViewExtensionBase
+{
+public:
+    FEdgePreservingPixelationViewExtension(const FAutoRegister& AutoRegister);
+
+    // ISceneViewExtension — implementaciones vacías requeridas por la interfaz.
+    virtual void SetupViewFamily(FSceneViewFamily& InViewFamily) override {}
+    virtual void SetupView(FSceneViewFamily& ViewFamily, FSceneView& View) override {}
+    virtual void BeginRenderViewFamily(FSceneViewFamily& InViewFamily) override {}
+
+    /**
+     * SubscribeToPostProcessingPass
+     *
+     * Llamado por el renderer en el render thread una vez por frame, una vez por
+     * pase de post-proceso existente en el grafo. Registramos el callback únicamente
+     * cuando PassId == EPostProcessingPass::Tonemap.
+     *
+     * El array InOutPassCallbacks acumula todos los callbacks de todas las extensiones
+     * para ese pase; el renderer los ejecuta secuencialmente encadenando la salida de
+     * uno como entrada del siguiente.
+     */
+    virtual void SubscribeToPostProcessingPass(
+        EPostProcessingPass PassId,
+        FAfterPassCallbackDelegateArray& InOutPassCallbacks,
+        bool bIsPassEnabled) override;
+
+private:
+    /**
+     * PostProcessPass_RenderThread
+     *
+     * Callback ejecutado en el render thread tras el pase Tonemap.
+     * Recibe la textura de color post-tonemapeada, despacha el compute shader de
+     * pixelación vía RDG y devuelve la nueva textura de color como FScreenPassTexture.
+     *
+     * El RDG infiere la dependencia OutputTexture(Write) → SceneColor(Read) y emite
+     * la barrera de recurso correspondiente antes del dispatch.
+     */
+    FScreenPassTexture PostProcessPass_RenderThread(
+        FRDGBuilder& GraphBuilder,
+        const FSceneView& View,
+        const FPostProcessMaterialInputs& InOutInputs);
+};

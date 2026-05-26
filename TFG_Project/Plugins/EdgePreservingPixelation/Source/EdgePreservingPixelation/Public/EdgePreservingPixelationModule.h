@@ -10,17 +10,27 @@
 #include "CoreMinimal.h"
 #include "Modules/ModuleInterface.h"
 
+class FEdgePreservingPixelationViewExtension;
+
 /**
  * FEdgePreservingPixelationModule
  *
  * Punto de entrada del plugin. Responsabilidades principales:
- *  - Registrar el directorio virtual de shaders (/Plugin/EdgePreservingPixelation)
- *    en el sistema de archivos virtual del compilador de shaders de UE5.
- *  - Liberar recursos al descargar el modulo.
+ *  - Registrar el directorio virtual de shaders (/Plugin/EdgePreservingPixelation).
+ *  - Instanciar y mantener con vida FEdgePreservingPixelationViewExtension, que es
+ *    el único propietario del punto de inyección en el pipeline de post-proceso.
+ *    Al destruir el TSharedPtr en ShutdownModule, FSceneViewExtensionBase
+ *    deregistra automáticamente la extensión del sistema global de vistas.
  */
 class EDGEPRESERVINGPIXELATION_API FEdgePreservingPixelationModule : public IModuleInterface
 {
 public:
     virtual void StartupModule() override;
     virtual void ShutdownModule() override;
+
+private:
+    // Propietario único de la extensión de vista. El shared_ptr mantiene viva la extensión
+    // durante todo el ciclo de vida del módulo; al reset(), el renderer la elimina del
+    // array interno de extensiones activas en el siguiente frame.
+    TSharedPtr<FEdgePreservingPixelationViewExtension, ESPMode::ThreadSafe> ViewExtension;
 };

@@ -2,6 +2,7 @@
 // TFG: Plugin de pixelacion con preservacion de bordes — Implementacion del modulo.
 
 #include "EdgePreservingPixelationModule.h"
+#include "EdgePreservingPixelationViewExtension.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
 #include "ShaderCore.h"
@@ -10,28 +11,31 @@
 
 void FEdgePreservingPixelationModule::StartupModule()
 {
-    // Registra el directorio fisico Shaders/ del plugin bajo la ruta virtual
-    // /Plugin/EdgePreservingPixelation en el sistema de archivos virtual del
-    // compilador de shaders de UE5 (FShaderSourceDirectoryMappings).
-    //
-    // Sin este mapeo, la directiva #include "/Plugin/EdgePreservingPixelation/..."
-    // en los archivos .usf fallaria con error de archivo no encontrado en tiempo
-    // de compilacion de shaders.
-    //
-    // Este registro debe realizarse en StartupModule (fase PostConfigInit) antes de
-    // que el ShaderCompilerManager emita trabajos de compilacion al iniciar el renderer.
+    // 1. Registrar el directorio virtual de shaders del plugin.
+    //    Obligatorio para que el compilador de shaders resuelva las rutas
+    //    /Plugin/EdgePreservingPixelation/... en los archivos .usf.
     FString PluginShaderDir = FPaths::Combine(
         IPluginManager::Get().FindPlugin(TEXT("EdgePreservingPixelation"))->GetBaseDir(),
         TEXT("Shaders")
     );
-
     AddShaderSourceDirectoryMapping(TEXT("/Plugin/EdgePreservingPixelation"), PluginShaderDir);
+
+    // 2. Instanciar la extensión de vista que inyecta el pase de compute en el
+    //    pipeline de post-proceso. FSceneViewExtensions::NewExtension crea la instancia,
+    //    la registra en el sistema global de extensiones de vista de UE5 y devuelve un
+    //    TSharedRef que se almacena aquí para mantener la extensión viva.
+    //
+    //    La extensión solo se activa durante el render; no tiene coste en frames
+    //    en los que no hay ninguna vista activa.
+    ViewExtension = FSceneViewExtensions::NewExtension<FEdgePreservingPixelationViewExtension>();
 }
 
 void FEdgePreservingPixelationModule::ShutdownModule()
 {
-    // No se requiere limpieza explicita en Fase 1.
-    // En fases posteriores: liberar SceneViewExtension y desregistrar delegates del renderer.
+    // Liberar la extensión de vista. Al destruirse el TSharedPtr (reset a nullptr),
+    // FSceneViewExtensionBase marca la extensión como inactiva en el registro global.
+    // El renderer la elimina de su array interno en el siguiente ciclo de frame.
+    ViewExtension.Reset();
 }
 
 #undef LOCTEXT_NAMESPACE

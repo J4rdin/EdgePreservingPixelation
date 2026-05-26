@@ -1,6 +1,6 @@
 // EdgePreservingPixelation.usf
 // TFG: Pipeline de pixelacion en tiempo real con preservacion de bordes.
-// Fase 1: Esqueleto base — pass-through directo sin procesamiento.
+// Fase 2: Cuantizacion UV (pixelacion) — sin logica de bordes aun.
 //
 // Compatible con UE5 5.5, Shader Model 5+ (D3D12 / Vulkan).
 // Punto de entrada del Compute Shader: MainCS
@@ -103,39 +103,74 @@ float   Padding1;
 [numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, 1)]
 void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 {
-    // Coordenadas del pixel de salida en espacio de pantalla completa.
-    // DispatchThreadId.xy esta en espacio de viewport [0, Width-1] x [0, Height-1].
-    // Se suma el offset del viewport (ViewRect.xy) para obtener coordenadas de render target.
+    // DispatchThreadId.xy esta en espacio local al viewport: [0, ViewportW-1] x [0, ViewportH-1].
+    // Se suma el offset del viewport (ViewRect.xy) para obtener la coordenada en el render target.
     uint2 PixelCoord = DispatchThreadId.xy + uint2(ViewRect.xy);
 
     // Descarte temprano de hilos fuera del viewport activo.
-    // Necesario porque el numero de grupos despachados se redondea hacia arriba
-    // al multiplo del tamano de grupo; los hilos sobrantes escribirian fuera de bounds.
-    if (PixelCoord.x >= (uint)(ViewRect.x + ViewRect.z) ||
-        PixelCoord.y >= (uint)(ViewRect.y + ViewRect.w))
+    // El numero de grupos se redondea hacia arriba al multiplo de THREADGROUP_SIZE;
+    // los hilos excedentes escribirian fuera de bounds sin este test.
+    if (PixelCoord.x >= uint(ViewRect.x + ViewRect.z) ||
+        PixelCoord.y >= uint(ViewRect.y + ViewRect.w))
     {
         return;
     }
 
-    // UV normalizadas [0,1] del pixel actual sobre el render target completo.
-    // El offset +0.5 centra el muestreo en el centro geometrico del pixel (filtrado correcto).
-    float2 UV = (float2(PixelCoord) + 0.5f) * InverseViewSize;
+    // =========================================================================
+    // CUANTIZACION UV — Algoritmo de pixelacion por bloques regulares
+    //
+    // Principio: todos los pixeles que pertenecen al mismo bloque de
+    // PixelSize x PixelSize muestrean SceneColor en el centroide geometrico
+    // de ese bloque. El resultado es una imagen donde cada region rectangular
+    // muestra un color uniforme, produciendo la estetica de pixelacion retro.
+    //
+    // Variables en espacio LOCAL al viewport (coordenadas [0, ViewportDim-1]):
+    //
+    //   LocalPixel         = DispatchThreadId.xy  (sin offset de ViewRect)
+    //   BlockIndex         = floor(LocalPixel / PixelSize)
+    //   BlockCentroidLocal = (BlockIndex + 0.5) * PixelSize
+    //
+    //   El factor +0.5 en el centroide garantiza que el muestreo cae en el
+    //   centro geometrico del bloque y no en su esquina superior izquierda,
+    //   evitando sesgos de muestreo sistematicos cuando PixelSize es impar.
+    //
+    // Ejemplo con PixelSize = 4:
+    //   LocalPixel = (5,3) → BlockIndex = (1,0) → CentroidLocal = (6,2)
+    //   LocalPixel = (4,0) → BlockIndex = (1,0) → CentroidLocal = (6,2) [mismo bloque]
+    //   LocalPixel = (3,0) → BlockIndex = (0,0) → CentroidLocal = (2,2) [bloque distinto]
+    // =========================================================================
+
+    // Paso 1: Coordenada local al viewport (independiente del offset del viewport).
+    float2 LocalPixel = float2(DispatchThreadId.xy);
+
+    // Paso 2: Indice entero 2D del bloque al que pertenece este hilo.
+    float2 BlockIndex = floor(LocalPixel / PixelSize);
+
+    // Paso 3: Centroide del bloque en coordenadas locales al viewport.
+    float2 BlockCentroidLocal = (BlockIndex + 0.5f) * PixelSize;
+
+    // Paso 4: Trasladar el centroide al espacio del render target completo
+    //         (re-anadir el offset del viewport).
+    float2 CentroidScreen = BlockCentroidLocal + float2(ViewRect.xy);
+
+    // Paso 5: UV normalizada [0,1] sobre el render target completo.
+    //         InverseViewSize = (1/RTWidth, 1/RTHeight).
+    //         +0.5 centra el muestreo en el interior del texel del centroide.
+    float2 QuantizedUV = (CentroidScreen + 0.5f) * InverseViewSize;
+
+    // Muestreo con LOD 0 explicito: en compute shaders las derivadas parciales
+    // (ddx/ddy) no estan disponibles, por lo que Sample() elegiria mip 0 de forma
+    // implicita pero con una advertencia del compilador. SampleLevel evita esto.
+    float4 Color = SceneColor.SampleLevel(LinearClampSampler, QuantizedUV, 0.0f);
 
     // =========================================================================
-    // FASE 1: Pass-through directo.
-    // Se escribe el color de escena sin modificacion como verificacion del pipeline.
-    //
-    // Fase 2 implementara aqui:
-    //   - Cuantizacion de UV al centroide del bloque de pixelacion (PixelSize).
-    //   - Deteccion de bordes mediante operador Sobel sobre SceneDepth.
-    //   - Mezcla adaptativa segun gradiente de profundidad.
-    //
-    // Fase 3 implementara aqui:
-    //   - Reprojection con SceneVelocity para acumulacion temporal.
-    //   - Filtro bilateral temporal para reduccion de ghosting.
+    // FASES FUTURAS:
+    //   Fase 3 — Deteccion de bordes:
+    //     Kernel Sobel 3x3 sobre SceneDepth linealizado → gradiente de profundidad
+    //     → mezcla adaptativa entre Color del centroide y color del pixel real.
+    //   Fase 4 — Estabilizacion temporal:
+    //     Reprojection con SceneVelocity + acumulacion con historial de frames.
     // =========================================================================
-
-    float4 Color = SceneColor.SampleLevel(LinearClampSampler, UV, 0.0f);
 
     OutputTexture[PixelCoord] = Color;
 }
