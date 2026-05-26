@@ -1,0 +1,13 @@
+/NOLOGO
+/errorReport:prompt
+/MACHINE:x64
+/SUBSYSTEM:WINDOWS
+/DEF
+/NAME:"UnrealEditor-EdgePreservingPixelation.dll"
+/IGNORE:4221
+/NODEFAULTLIB
+"C:\Users\manur\Documents\GitHub\TFG_REPO\TFG_Project\Intermediate\Build\Win64\x64\TFG_ProjectEditor\Development\UnrealEd\SharedPCH.UnrealEd.Project.ValApi.Cpp20.InclOrderUnreal5_3.h.obj"
+"C:\Users\manur\Documents\GitHub\TFG_REPO\TFG_Project\Plugins\EdgePreservingPixelation\Intermediate\Build\Win64\x64\UnrealEditor\Development\EdgePreservingPixelation\Module.EdgePreservingPixelation.cpp.obj"
+"C:\Users\manur\Documents\GitHub\TFG_REPO\TFG_Project\Plugins\EdgePreservingPixelation\Intermediate\Build\Win64\x64\UnrealEditor\Development\EdgePreservingPixelation\PerModuleInline.gen.cpp.obj"
+"C:\Users\manur\Documents\GitHub\TFG_REPO\TFG_Project\Plugins\EdgePreservingPixelation\Intermediate\Build\Win64\x64\UnrealEditor\Development\EdgePreservingPixelation\Default.rc2.res"
+/OUT:"C:\Users\manur\Documents\GitHub\TFG_REPO\TFG_Project\Plugins\EdgePreservingPixelation\Intermediate\Build\Win64\x64\UnrealEditor\Development\EdgePreservingPixelation\UnrealEditor-EdgePreservingPixelation.lib"

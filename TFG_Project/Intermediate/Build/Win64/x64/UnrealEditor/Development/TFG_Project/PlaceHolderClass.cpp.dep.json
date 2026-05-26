@@ -1,0 +1,14 @@
+{
+    "Version": "1.2",
+    "Data": {
+        "Source": "c:\\users\\manur\\documents\\github\\tfg_repo\\tfg_project\\source\\tfg_project\\placeholderclass.cpp",
+        "ProvidedModule": "",
+        "PCH": "c:\\users\\manur\\documents\\github\\tfg_repo\\tfg_project\\intermediate\\build\\win64\\x64\\tfg_projecteditor\\development\\unrealed\\sharedpch.unrealed.project.valapi.cpp20.inclorderunreal5_3.h.pch",
+        "Includes": [
+            "c:\\users\\manur\\documents\\github\\tfg_repo\\tfg_project\\intermediate\\build\\win64\\x64\\unrealeditor\\development\\tfg_project\\definitions.tfg_project.h",
+            "c:\\users\\manur\\documents\\github\\tfg_repo\\tfg_project\\source\\tfg_project\\placeholderclass.h"
+        ],
+        "ImportedModules": [],
+        "ImportedHeaderUnits": []
+    }
+}

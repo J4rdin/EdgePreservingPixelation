@@ -1,0 +1,14 @@
+/NOLOGO
+/errorReport:prompt
+/MACHINE:x64
+/SUBSYSTEM:WINDOWS
+/DEF
+/NAME:"UnrealEditor-TFG_Project.dll"
+/IGNORE:4221
+/NODEFAULTLIB
+"C:\Users\manur\Documents\GitHub\TFG_REPO\TFG_Project\Intermediate\Build\Win64\x64\TFG_ProjectEditor\Development\UnrealEd\SharedPCH.UnrealEd.Project.ValApi.Cpp20.InclOrderUnreal5_3.h.obj"
+"C:\Users\manur\Documents\GitHub\TFG_REPO\TFG_Project\Intermediate\Build\Win64\x64\UnrealEditor\Development\TFG_Project\PlaceHolderClass.cpp.obj"
+"C:\Users\manur\Documents\GitHub\TFG_REPO\TFG_Project\Intermediate\Build\Win64\x64\UnrealEditor\Development\TFG_Project\TFG_Project.cpp.obj"
+"C:\Users\manur\Documents\GitHub\TFG_REPO\TFG_Project\Intermediate\Build\Win64\x64\UnrealEditor\Development\TFG_Project\PerModuleInline.gen.cpp.obj"
+"C:\Users\manur\Documents\GitHub\TFG_REPO\TFG_Project\Intermediate\Build\Win64\x64\UnrealEditor\Development\TFG_Project\Default.rc2.res"
+/OUT:"C:\Users\manur\Documents\GitHub\TFG_REPO\TFG_Project\Intermediate\Build\Win64\x64\UnrealEditor\Development\TFG_Project\UnrealEditor-TFG_Project.lib"

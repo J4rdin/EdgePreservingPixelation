@@ -14,6 +14,7 @@
     <ProjectReference Include="..\..\..\..\..\..\..\..\..\..\Program Files\Epic Games\UE_5.5\Engine\Source\Programs\UnrealBuildTool\UnrealBuildTool.csproj"><Private>false</Private></ProjectReference>
   </ItemGroup>
   <ItemGroup>
+  <Compile Include="..\..\..\..\Plugins\EdgePreservingPixelation\Source\EdgePreservingPixelation\EdgePreservingPixelation.Build.cs"><Link>Plugins\EdgePreservingPixelation\Source\EdgePreservingPixelation\EdgePreservingPixelation.Build.cs</Link></Compile>
   <Compile Include="..\..\..\..\Source\TFG_Project.Target.cs"><Link>Source\TFG_Project.Target.cs</Link></Compile>
   <Compile Include="..\..\..\..\Source\TFG_ProjectEditor.Target.cs"><Link>Source\TFG_ProjectEditor.Target.cs</Link></Compile>
   <Compile Include="..\..\..\..\Source\TFG_Project\TFG_Project.Build.cs"><Link>Source\TFG_Project\TFG_Project.Build.cs</Link></Compile>

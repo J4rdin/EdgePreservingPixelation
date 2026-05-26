@@ -1,7 +1,7 @@
 {
   "format": 1,
   "restore": {
-    "C:\\Users\\manur\\Documents\\Unreal Projects\\TFG_Project\\Intermediate\\Build\\BuildRulesProjects\\TFG_ProjectModuleRules\\TFG_ProjectModuleRules.csproj": {}
+    "C:\\Users\\manur\\Documents\\GitHub\\TFG_REPO\\TFG_Project\\Intermediate\\Build\\BuildRulesProjects\\TFG_ProjectModuleRules\\TFG_ProjectModuleRules.csproj": {}
   },
   "projects": {
     "C:\\Program Files\\Epic Games\\UE_5.5\\Engine\\Intermediate\\Build\\BuildRulesProjects\\UE5ProgramRules\\UE5ProgramRules.csproj": {
@@ -1118,14 +1118,14 @@
         }
       }
     },
-    "C:\\Users\\manur\\Documents\\Unreal Projects\\TFG_Project\\Intermediate\\Build\\BuildRulesProjects\\TFG_ProjectModuleRules\\TFG_ProjectModuleRules.csproj": {
+    "C:\\Users\\manur\\Documents\\GitHub\\TFG_REPO\\TFG_Project\\Intermediate\\Build\\BuildRulesProjects\\TFG_ProjectModuleRules\\TFG_ProjectModuleRules.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\Users\\manur\\Documents\\Unreal Projects\\TFG_Project\\Intermediate\\Build\\BuildRulesProjects\\TFG_ProjectModuleRules\\TFG_ProjectModuleRules.csproj",
+        "projectUniqueName": "C:\\Users\\manur\\Documents\\GitHub\\TFG_REPO\\TFG_Project\\Intermediate\\Build\\BuildRulesProjects\\TFG_ProjectModuleRules\\TFG_ProjectModuleRules.csproj",
         "projectName": "TFG_ProjectModuleRules",
-        "projectPath": "C:\\Users\\manur\\Documents\\Unreal Projects\\TFG_Project\\Intermediate\\Build\\BuildRulesProjects\\TFG_ProjectModuleRules\\TFG_ProjectModuleRules.csproj",
+        "projectPath": "C:\\Users\\manur\\Documents\\GitHub\\TFG_REPO\\TFG_Project\\Intermediate\\Build\\BuildRulesProjects\\TFG_ProjectModuleRules\\TFG_ProjectModuleRules.csproj",
         "packagesPath": "C:\\Users\\manur\\.nuget\\packages\\",
-        "outputPath": "C:\\Users\\manur\\Documents\\Unreal Projects\\TFG_Project\\Intermediate\\Build\\BuildRulesProjects\\TFG_ProjectModuleRules\\obj\\",
+        "outputPath": "C:\\Users\\manur\\Documents\\GitHub\\TFG_REPO\\TFG_Project\\Intermediate\\Build\\BuildRulesProjects\\TFG_ProjectModuleRules\\obj\\",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "C:\\Users\\manur\\AppData\\Roaming\\NuGet\\NuGet.Config",
