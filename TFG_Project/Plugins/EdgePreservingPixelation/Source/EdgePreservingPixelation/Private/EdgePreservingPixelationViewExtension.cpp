@@ -41,20 +41,6 @@ void FEdgePreservingPixelationViewExtension::SubscribeToPostProcessingPass(
     FAfterPassCallbackDelegateArray& InOutPassCallbacks,
     bool bIsPassEnabled)
 {
-    // DIAG: confirmar que el renderer llama a esta función y con qué valor de Pass.
-    // Se loguea una única vez para evitar spam de frames.
-    static bool bLoggedSubscribe = false;
-    if (!bLoggedSubscribe)
-    {
-        bLoggedSubscribe = true;
-        UE_LOG(LogTemp, Warning,
-            TEXT("[EPP] SubscribeToPostProcessingPass — Pass=%d Tonemap=%d bIsPassEnabled=%d"),
-            (int32)Pass, (int32)EPostProcessingPass::Tonemap, bIsPassEnabled ? 1 : 0);
-    }
-
-    // Registrar el callback únicamente para el pase Tonemap.
-    // El renderer llama a esta función una vez por pase activo del pipeline de post-proceso;
-    // ignoramos todos los valores de Pass que no sean Tonemap.
     if (Pass == EPostProcessingPass::Tonemap)
     {
         InOutPassCallbacks.Add(FAfterPassCallbackDelegate::CreateRaw(
@@ -75,28 +61,8 @@ FScreenPassTexture FEdgePreservingPixelationViewExtension::PostProcessPass_Rende
 {
     check(IsInRenderingThread());
 
-    // DIAG: confirmar que el callback se ejecuta en el render thread.
-    static bool bLoggedCallback = false;
-    if (!bLoggedCallback)
-    {
-        bLoggedCallback = true;
-        UE_LOG(LogTemp, Warning, TEXT("[EPP] PostProcessPass_RenderThread: callback ACTIVO en render thread"));
-    }
-
     // Obtener la textura de color producida por el pase Tonemap (LDR, formato sRGB o similar).
     const FScreenPassTexture InputSceneColor(InOutInputs.GetInput(EPostProcessMaterialInput::SceneColor));
-
-    // DIAG: estado de las entradas (se loguea una única vez).
-    static bool bLoggedInputs = false;
-    if (!bLoggedInputs)
-    {
-        bLoggedInputs = true;
-        UE_LOG(LogTemp, Warning,
-            TEXT("[EPP] InputSceneColor.IsValid=%d  OverrideOutput.IsValid=%d"),
-            InputSceneColor.IsValid() ? 1 : 0,
-            InOutInputs.OverrideOutput.IsValid() ? 1 : 0);
-    }
-
     if (!InputSceneColor.IsValid())
     {
         return InputSceneColor;

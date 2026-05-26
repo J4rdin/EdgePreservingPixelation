@@ -17,10 +17,16 @@ class FEdgePreservingPixelationViewExtension;
  *
  * Punto de entrada del plugin. Responsabilidades principales:
  *  - Registrar el directorio virtual de shaders (/Plugin/EdgePreservingPixelation).
- *  - Instanciar y mantener con vida FEdgePreservingPixelationViewExtension, que es
- *    el único propietario del punto de inyección en el pipeline de post-proceso.
- *    Al destruir el TSharedPtr en ShutdownModule, FSceneViewExtensionBase
- *    deregistra automáticamente la extensión del sistema global de vistas.
+ *  - Instanciar y mantener con vida FEdgePreservingPixelationViewExtension.
+ *
+ * Ciclo de vida del view extension:
+ *   StartupModule   → AddShaderSourceDirectoryMapping (PostConfigInit, pre-shader-compiler).
+ *   OnPostEngineInit→ FSceneViewExtensions::NewExtension (requiere GEngine inicializado).
+ *   ShutdownModule  → ViewExtension.Reset() desregistra la extensión del renderer.
+ *
+ * La separación en dos fases es necesaria porque PostConfigInit se ejecuta antes de
+ * que GEngine exista; FSceneViewExtensions::NewExtension necesita el registro de vistas
+ * de GEngine para que SubscribeToPostProcessingPass sea invocado por el renderer.
  */
 class EDGEPRESERVINGPIXELATION_API FEdgePreservingPixelationModule : public IModuleInterface
 {
@@ -29,8 +35,13 @@ public:
     virtual void ShutdownModule() override;
 
 private:
+    // Callback vinculado a FCoreDelegates::OnPostEngineInit.
+    // Se llama cuando GEngine está completamente inicializado y el sistema de
+    // view extensions es operativo.
+    void OnPostEngineInit();
+
     // Propietario único de la extensión de vista. El shared_ptr mantiene viva la extensión
-    // durante todo el ciclo de vida del módulo; al reset(), el renderer la elimina del
-    // array interno de extensiones activas en el siguiente frame.
+    // durante todo el ciclo de vida del módulo; al reset(), FSceneViewExtensionBase
+    // deregistra automáticamente la extensión del sistema global de vistas.
     TSharedPtr<FEdgePreservingPixelationViewExtension, ESPMode::ThreadSafe> ViewExtension;
 };
