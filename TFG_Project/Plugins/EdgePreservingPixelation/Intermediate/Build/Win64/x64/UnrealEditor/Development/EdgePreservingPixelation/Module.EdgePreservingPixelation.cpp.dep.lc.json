@@ -42,7 +42,14 @@
             "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\rendercore\\public\\rendergraphtrace.h",
             "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\rendercore\\public\\rendergraphvalidation.h",
             "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\core\\public\\experimental\\containers\\robinhoodhashtable.h",
-            "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\rendercore\\public\\rendergraphbuilder.inl"
+            "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\rendercore\\public\\rendergraphbuilder.inl",
+            "c:\\users\\manur\\documents\\github\\tfg_repo\\tfg_project\\plugins\\edgepreservingpixelation\\source\\edgepreservingpixelation\\private\\edgepreservingpixelationviewextension.cpp",
+            "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\renderer\\public\\screenpass.h",
+            "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\engine\\public\\canvastypes.h",
+            "c:\\program files\\epic games\\ue_5.5\\engine\\intermediate\\build\\win64\\unrealeditor\\inc\\engine\\uht\\canvastypes.generated.h",
+            "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\rendercore\\public\\commonrenderresources.h",
+            "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\renderer\\public\\screenpass.inl",
+            "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\renderer\\public\\postprocess\\postprocessmaterialinputs.h"
         ],
         "ImportedModules": [],
         "ImportedHeaderUnits": []
