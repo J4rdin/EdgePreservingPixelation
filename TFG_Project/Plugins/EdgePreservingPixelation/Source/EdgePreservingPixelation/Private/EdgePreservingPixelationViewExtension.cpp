@@ -194,27 +194,9 @@ FScreenPassTexture FEdgePreservingPixelationViewExtension::PostProcessPass_Rende
         FComputeShaderUtils::GetGroupCount(ViewportSize, FIntPoint(8, 8))
     );
 
-    // -----------------------------------------------------------------------
-    // Manejo del OverrideOutput
-    //
-    // En UE5.5, el pipeline puede pre-asignar una textura de destino final
-    // (p. ej. el backbuffer del swapchain) mediante InOutInputs.OverrideOutput.
-    // Si está presente, el engine espera que escribamos en ella; ignorarla haría
-    // que el pipeline mostrara el backbuffer original sin nuestro efecto.
-    //
-    // Flujo:
-    //   1. Compute shader escribe en OutputTexture (UAV).
-    //   2. Si OverrideOutput es válido, copiamos OutputTexture → OverrideOutput.
-    //   3. Devolvemos la textura final al pipeline.
-    // -----------------------------------------------------------------------
-    FRDGTextureRef FinalTexture = OutputTexture;
-    if (InOutInputs.OverrideOutput.IsValid())
-    {
-        FinalTexture = InOutInputs.OverrideOutput.Texture;
-        AddCopyTexturePass(GraphBuilder, OutputTexture, FinalTexture);
-    }
-
     // Devolver la textura de salida con el ViewRect original preservado.
-    // El pipeline de post-proceso encadenará esta textura como entrada del siguiente pase.
-    return FScreenPassTexture(FinalTexture, InputSceneColor.ViewRect);
+    // El pipeline de post-proceso usa el valor de retorno como escena de color
+    // para los pases subsiguientes; no es necesario copiar a OverrideOutput porque
+    // el view extension está registrado correctamente via OnPostEngineInit.
+    return FScreenPassTexture(OutputTexture, InputSceneColor.ViewRect);
 }
