@@ -1,0 +1,14 @@
+{
+	"Targets": [
+		{
+			"Name": "TFG_Project",
+			"Path": "..\\Source\\TFG_Project.Target.cs",
+			"Type": "Game"
+		},
+		{
+			"Name": "TFG_ProjectEditor",
+			"Path": "..\\Source\\TFG_ProjectEditor.Target.cs",
+			"Type": "Editor"
+		}
+	]
+}

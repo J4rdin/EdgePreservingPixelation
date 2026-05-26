@@ -1,0 +1,14 @@
+{
+	"version": 1,
+	"changelists": [
+		{
+			"guid": "00000000000000000000000000000000",
+			"description": "Default Uncontrolled Changelist",
+			"files": [
+				"C:/Users/manur/Documents/Unreal Projects/TFG_Project/Content/StarterContent/Architecture/Floor_400x400.uasset",
+				"C:/Users/manur/Documents/Unreal Projects/TFG_Project/Content/TFG_PixelShader/M_PixelShader.uasset",
+				"C:/Users/manur/Documents/Unreal Projects/TFG_Project/Content/__ExternalActors__/ThirdPerson/Maps/ThirdPersonMap/1/AZ/A7GPT109Y6ZTTJD4A7TXER.uasset"
+			]
+		}
+	]
+}
