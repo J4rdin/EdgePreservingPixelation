@@ -49,7 +49,8 @@
             "c:\\program files\\epic games\\ue_5.5\\engine\\intermediate\\build\\win64\\unrealeditor\\inc\\engine\\uht\\canvastypes.generated.h",
             "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\rendercore\\public\\commonrenderresources.h",
             "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\renderer\\public\\screenpass.inl",
-            "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\renderer\\public\\postprocess\\postprocessmaterialinputs.h"
+            "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\renderer\\public\\postprocess\\postprocessmaterialinputs.h",
+            "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\renderer\\public\\scenerendertargetparameters.h"
         ],
         "ImportedModules": [],
         "ImportedHeaderUnits": []

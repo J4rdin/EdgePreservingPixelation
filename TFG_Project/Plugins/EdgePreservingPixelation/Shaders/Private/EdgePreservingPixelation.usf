@@ -1,22 +1,24 @@
 // EdgePreservingPixelation.usf
 // TFG: Pipeline de pixelacion en tiempo real con preservacion de bordes.
-// Fase 3: Deteccion de bordes geometricos via puntuacion combinada de dos senales:
+// Fase 3: Deteccion de bordes geometricos via puntuacion combinada de dos senales,
+//         cada una evaluada con el test min(Dev2, Jump) por eje:
 //
-//   Senal 1 — Desviacion de planaridad de profundidad (segundo orden):
-//     Para cada par de vecinos opuestos (H, V, diag1, diag2) se predice la profundidad
-//     central extrapolando linealmente: predicted = (vecino_A + vecino_B) / 2.
-//     Desviacion = |real - predicted|. Una pendiente plana produce desviacion ~0 aunque
-//     su gradiente de primer orden sea grande; un escalon real produce desviacion alta.
-//     Normalizado por la profundidad minima del vecindario 3x3 (no la del pixel central):
-//     asi la metrica es invariante a distancia pero no se diluye por el fondo lejano.
+//   Test min(Dev2, Jump) para un par de vecinos opuestos (A, Centro, B):
+//     Dev2 = |2*C - A - B|  (diferencia de segundo orden: cero en rampas lineales)
+//     Jump = |A - B|        (diferencia de primer orden: cero en curvatura simetrica)
+//     Score = min(Dev2, Jump)
 //
-//   Senal 2 — Sobel de primer orden sobre normal del GBuffer (GBufferA.rgb):
-//     Una superficie plana oblicua tiene normal constante → gradiente ~0. Una esquina
-//     o arista entre superficies de distinta orientacion produce gradiente elevado.
+//     Caso ramp/pendiente plana: A = C-k, B = C+k → Dev2=0, min=0.
+//     Caso curvatura simetrica: A = C-k, B = C-k → Jump=0, min=0.
+//     Caso escalon real: un lado muy distinto del otro → ambos grandes, min grande.
 //
-//   Fusion: CombinedScore = DepthWeight * DesvPlanaridad + NormalWeight * GradNormal
-//   Borde detectado cuando CombinedScore > EdgeThreshold. La suma ponderada permite
-//   que un borde fuerte en cualquiera de las dos senales sea suficiente para superarlo.
+//   Senal 1 — Profundidad lineal (SceneDepth): 4 ejes H/V/D1/D2, max de los scores.
+//     Normalizado por la profundidad minima del vecindario (invariante a distancia,
+//     sin dilucion por el fondo lejano).
+//
+//   Senal 2 — Normal del GBuffer (GBufferA.rgb): misma logica vectorial, media de canales.
+//
+//   Fusion: CombinedScore = DepthWeight * Score1 + NormalWeight * Score2 > EdgeThreshold.
 //
 //         Modo debug (EPP.DebugMode 1): bordes en blanco sobre negro para verificacion aislada.
 //         La mezcla adaptativa borde/centroide se implementara en Fase 4.
@@ -156,46 +158,45 @@ float SampleLinearDepth(int2 ScreenCoord)
 }
 
 // ----------------------------------------------------------------------------
-// ComputeDepthPlanarityDeviation
+// ComputeDepthEdgeScore
 //
-// Mide la desviacion de planaridad de la profundidad centrada en PixelCoord.
-// Es un detector de bordes de segundo orden: a diferencia del Sobel (primer orden),
-// no responde a pendientes planas, solo a quiebros (discontinuidades reales).
+// Detecta discontinuidades reales de profundidad distinguiendolas de pendientes
+// suaves y de la curvatura interior de objetos.
 //
-// Principio: si la superficie es localmente plana, la profundidad del pixel central
-// puede predecirse interpolando linealmente entre dos vecinos opuestos:
+// Test min(Dev2, Jump) por eje — por que funciona:
 //
-//   predicted_center = (vecino_A + vecino_B) / 2
+//   Para un par de vecinos opuestos (A, Centro=C, B):
+//     Dev2  = |2C - A - B|    diferencia de segundo orden
+//     Jump  = |A - B|         diferencia de primer orden (magnitud del salto)
+//     Score = min(Dev2, Jump)
 //
-// La desviacion |real - predicted| es ~0 en una rampa lineal (suelo oblicuo) y
-// grande en un escalon de profundidad (borde geometrico real).
+//   Caso ramp/pendiente plana (suelo oblicuo): A=C-k, B=C+k (progresion lineal)
+//     Dev2 = 0  (la rampa es predecible por interpolacion lineal)
+//     min(0, 2k) = 0.  ← Suprime el falso positivo del suelo. ✓
 //
-// Se evaluan 4 pares de vecinos opuestos desde p[1][1]:
-//   H  : (p[1][0], p[1][2])   horizontal
-//   V  : (p[0][1], p[2][1])   vertical
-//   D1 : (p[0][0], p[2][2])   diagonal noroeste-sureste
-//   D2 : (p[0][2], p[2][0])   diagonal noreste-suroeste
+//   Caso curvatura simetrica (interior de esfera o cilindro):
+//     A = C-k, B = C-k (ambos vecinos a igual distancia del centro, simetria par)
+//     Jump = |A-B| = 0  (vecinos simetricos, sin salto entre ellos)
+//     min(2k, 0) = 0.  ← Suprime el interior de objetos curvos. ✓
 //
-// La magnitud de la desviacion es el maximo de los cuatro ejes; el maximo preserva
-// la respuesta al eje con el escalon mas fuerte sin acumular ruido de los otros.
+//   Caso escalon geometrico real (oclusion, silueta):
+//     Un vecino es la superficie proxima, el otro el fondo lejano.
+//     El par es fuertemente asimetrico: Dev2 grande Y Jump grande.
+//     min(grande, grande) = grande.  ← Detecta el borde. ✓
 //
-// Normalizacion por profundidad minima del vecindario 3×3:
-//   Desviacion relativa = Desviacion / max(MinDepth, 1.0)
-// Usar la profundidad minima (la superficie mas cercana del parche) en lugar de la
-// del pixel central resuelve dos problemas a la vez:
-//   - Invariancia a la distancia: el mismo escalon produce el mismo valor relativo
-//     independientemente de si esta a 1 m o a 100 m de la camara.
-//   - No dilucion por el fondo: en el borde superior de un objeto en primer plano,
-//     el pixel central puede ser el objeto (cercano) o el fondo (lejano) segun la
-//     posicion exacta del borde. Con MinDepth, la referencia siempre es la superficie
-//     proxima, no el fondo lejano, por lo que el escalon no se diluye.
+// Se evaluan 4 ejes (H, V, diagonal NW-SE, diagonal NE-SW); se toma el maximo
+// para responder al eje con el escalon mas pronunciado sin acumular ruido.
+//
+// Normalizacion por la profundidad minima del vecindario 3×3 (no la del pixel
+// central): la metrica es invariante a distancia de camara y no se diluye cuando
+// el pixel central cae en el lado lejano del borde.
 //
 // Parametros:
 //   PixelCoord — coordenada entera absoluta en el render target [px].
-//   OutMinDepth — profundidad lineal minima del vecindario 3×3 [cm]. Parametro de salida.
-// Devuelve: desviacion de planaridad relativa, adimensional (invariante a distancia).
+//   OutMinDepth — profundidad lineal minima del vecindario 3×3 [cm].
+// Devuelve: puntuacion de borde de profundidad, adimensional.
 // ----------------------------------------------------------------------------
-float ComputeDepthPlanarityDeviation(int2 PixelCoord, out float OutMinDepth)
+float ComputeDepthEdgeScore(int2 PixelCoord, out float OutMinDepth)
 {
     // Limites inclusivos del viewport en coordenadas enteras de render target.
     int2 VPMin = int2(ViewRect.xy);
@@ -205,7 +206,7 @@ float ComputeDepthPlanarityDeviation(int2 PixelCoord, out float OutMinDepth)
     // Muestreo de la cuadricula 3×3 centrada en PixelCoord.
     // p[row][col], con row/col ∈ {0,1,2} correspondiente a offset (dy,dx) ∈ {-1,0,+1}.
     float p[3][3];
-    float MinDepth = 1.0e38f;   // acumulador del minimo de profundidad del vecindario
+    float MinDepth = 1.0e38f;
     [unroll]
     for (int dy = -1; dy <= 1; dy++)
     {
@@ -220,22 +221,22 @@ float ComputeDepthPlanarityDeviation(int2 PixelCoord, out float OutMinDepth)
     }
     OutMinDepth = MinDepth;
 
-    // Desviacion de planaridad para cada par de vecinos opuestos.
-    // predicted = (A + B) / 2 → residuo = |centro - predicted| = |2*centro - A - B| / 2
-    // El factor 1/2 es constante y se absorbe en el umbral; se omite para simplificar.
-    float Center = p[1][1];
-    float DevH  = abs(2.0f * Center - p[1][0] - p[1][2]);   // eje horizontal
-    float DevV  = abs(2.0f * Center - p[0][1] - p[2][1]);   // eje vertical
-    float DevD1 = abs(2.0f * Center - p[0][0] - p[2][2]);   // diagonal NW-SE
-    float DevD2 = abs(2.0f * Center - p[0][2] - p[2][0]);   // diagonal NE-SW
+    float C = p[1][1];
 
-    // Maximo de los cuatro ejes: responde al eje con el escalon mas pronunciado.
-    float Deviation = max(max(DevH, DevV), max(DevD1, DevD2));
+    // min(Dev2, Jump) por eje:
+    //   Dev2  = |2C - A - B|   suprime rampas lineales (Dev2 = 0 para rampas)
+    //   Jump  = |A - B|        suprime curvatura simetrica (Jump = 0 si A == B)
+    //   Score = min: alto solo si el par es asimetrico en AMBAS medidas → escalon real
+    float ScoreH  = min(abs(2.0f*C - p[1][0] - p[1][2]),  abs(p[1][0] - p[1][2]));
+    float ScoreV  = min(abs(2.0f*C - p[0][1] - p[2][1]),  abs(p[0][1] - p[2][1]));
+    float ScoreD1 = min(abs(2.0f*C - p[0][0] - p[2][2]),  abs(p[0][0] - p[2][2]));
+    float ScoreD2 = min(abs(2.0f*C - p[0][2] - p[2][0]),  abs(p[0][2] - p[2][0]));
 
-    // Normalizacion por la profundidad minima del vecindario (ver descripcion arriba).
-    // max(..., 1.0) previene division por cero o near-zero cuando toda la escena
-    // esta a < 1 cm de la camara (imposible en la practica, pero defensivo).
-    return Deviation / max(MinDepth, 1.0f);
+    float Score = max(max(ScoreH, ScoreV), max(ScoreD1, ScoreD2));
+
+    // Normalizacion por profundidad minima del vecindario.
+    // max(..., 1.0) previene division por zero si toda la escena esta a < 1 cm.
+    return Score / max(MinDepth, 1.0f);
 }
 
 // ----------------------------------------------------------------------------
@@ -261,30 +262,40 @@ float3 SampleGBufferNormal(int2 ScreenCoord)
 }
 
 // ----------------------------------------------------------------------------
-// ComputeSobelNormalGradient
+// ComputeNormalEdgeScore
 //
-// Aplica el operador Sobel 3×3 sobre la normal codificada del GBuffer en los tres
-// canales RGB y devuelve una magnitud escalar del gradiente de normal.
+// Detecta discontinuidades reales de la normal del GBuffer (GBufferA.rgb)
+// distinguiendolas de la curvatura suave de superficies curvas.
 //
-// Se aplican los kernels Sobel estandar (primer orden) por canal:
-//   Gx_rgb = convolucion horizontal Sobel sobre (r, g, b)
-//   Gy_rgb = convolucion vertical   Sobel sobre (r, g, b)
+// Aplica el mismo test min(Dev2, Jump) que ComputeDepthEdgeScore, pero
+// operando sobre vectores float3 (un valor por canal RGB de la normal codificada):
 //
-// La magnitud escalar se obtiene como la media de las normas L1 por canal:
-//   Magnitud = mean_c( |Gx_c| + |Gy_c| ) = dot(abs(Gx_rgb)+abs(Gy_rgb), (1/3, 1/3, 1/3))
+//   Para un par opuesto (A, C, B), por canal:
+//     Dev2  = |2C - A - B|   (3-vector)   cero en variacion lineal de la normal
+//     Jump  = |A - B|         (3-vector)   cero si ambos vecinos tienen la misma normal
+//     Score_canal = min(Dev2_canal, Jump_canal)
 //
-// Una superficie plana (normal constante en la vecindad 3×3) produce Gx_rgb ≈ 0 y
-// Gy_rgb ≈ 0 → magnitud ≈ 0, independientemente del angulo de inclinacion respecto
-// a la camara. Primer orden es correcto aqui: no queremos segundo orden sobre la normal
-// porque dos superficies adyacentes con normales distintas deben dar gradiente alto
-// (lo que para profundidad seria un falso positivo es aqui la deteccion correcta).
+//   La normal de una superficie CURVA varia aproximadamente como una funcion
+//   circular, cuya segunda diferencia discreta es O(curvatura²·h²) mientras
+//   que la primera diferencia es O(curvatura·h). El min de ambas es O(curvatura²·h²),
+//   de magnitud muy inferior a la de una arista real (O(1)).
+//   Esto suprime la curvatura suave de esferas, cilindros y meshes redondeados.
+//
+//   Una ARISTA REAL (cruce entre dos normales muy diferentes) produce un par
+//   fuertemente asimetrico: Dev2 grande Y Jump grande → min grande. ✓
+//
+//   Una superficie PLANA tiene normal constante → todos los terminos son 0. ✓
+//
+// Se evaluan 4 ejes (H, V, D1, D2). Para cada eje, el score escalar es la
+// media de los scores por canal: dot(min(Dev2, Jump), (1/3, 1/3, 1/3)).
+// El resultado final es el maximo de los cuatro ejes.
 //
 // Parametro: PixelCoord — coordenada entera absoluta en el render target [px].
-// Devuelve:  magnitud escalar del gradiente de normal, adimensional [0, ~algo].
+// Devuelve:  puntuacion de borde de normal, adimensional.
 // ----------------------------------------------------------------------------
-float ComputeSobelNormalGradient(int2 PixelCoord)
+float ComputeNormalEdgeScore(int2 PixelCoord)
 {
-    // Limites del viewport, igual que en ComputeDepthPlanarityDeviation.
+    // Limites del viewport, igual que en ComputeDepthEdgeScore.
     int2 VPMin = int2(ViewRect.xy);
     int2 VPMax = int2(ViewRect.x + ViewRect.z - 1,
                       ViewRect.y + ViewRect.w - 1);
@@ -302,18 +313,18 @@ float ComputeSobelNormalGradient(int2 PixelCoord)
         }
     }
 
-    // Convoluciones Sobel por canal (float3): mismos kernels Gx, Gy que para profundidad.
-    float3 Gx = (-1.0f * p[0][0] + 1.0f * p[0][2])
-              + (-2.0f * p[1][0] + 2.0f * p[1][2])
-              + (-1.0f * p[2][0] + 1.0f * p[2][2]);
-
-    float3 Gy = (-1.0f * p[0][0] - 2.0f * p[0][1] - 1.0f * p[0][2])
-              + ( 1.0f * p[2][0] + 2.0f * p[2][1] + 1.0f * p[2][2]);
-
-    // Magnitud escalar: media de las normas L1 por canal.
-    // dot con (1/3, 1/3, 1/3) equivale a sum/3 sin bucle explicito.
+    float3 C = p[1][1];
+    // Factor de reduccion de 3 canales a escalar: media aritmetica de canales.
     const float3 OneThird = float3(1.0f / 3.0f, 1.0f / 3.0f, 1.0f / 3.0f);
-    return dot(abs(Gx) + abs(Gy), OneThird);
+
+    // min(Dev2, Jump) vectorial por eje → media de canales para obtener escalar.
+    // abs() y min() operan componente a componente sobre float3 en HLSL.
+    float ScoreH  = dot(min(abs(2.0f*C - p[1][0] - p[1][2]),  abs(p[1][0] - p[1][2])),  OneThird);
+    float ScoreV  = dot(min(abs(2.0f*C - p[0][1] - p[2][1]),  abs(p[0][1] - p[2][1])),  OneThird);
+    float ScoreD1 = dot(min(abs(2.0f*C - p[0][0] - p[2][2]),  abs(p[0][0] - p[2][2])),  OneThird);
+    float ScoreD2 = dot(min(abs(2.0f*C - p[0][2] - p[2][0]),  abs(p[0][2] - p[2][0])),  OneThird);
+
+    return max(max(ScoreH, ScoreV), max(ScoreD1, ScoreD2));
 }
 
 // =============================================================================
@@ -382,16 +393,17 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     //   → CombinedScore pequeno → no se detecta como borde.
     // =========================================================================
 
-    // --- Senal 1: desviacion de planaridad de profundidad (segundo orden) ---
-    // OutMinDepth recibe la profundidad minima del vecindario 3×3; se usa dentro de la
-    // funcion para la normalizacion. El valor devuelto ya es adimensional.
+    // --- Senal 1: puntuacion de borde de profundidad ---
+    // min(Dev2, Jump) por eje sobre profundidad lineal, normalizado por MinDepth.
+    // Suprime rampas (Dev2=0) y curvatura simetrica (Jump=0). Solo escalones reales
+    // producen un score alto. El valor devuelto ya es adimensional.
     float MinNeighborDepth;
-    float RelativeDepthDev = ComputeDepthPlanarityDeviation(int2(PixelCoord), MinNeighborDepth);
+    float RelativeDepthDev = ComputeDepthEdgeScore(int2(PixelCoord), MinNeighborDepth);
 
-    // --- Senal 2: gradiente de normal del GBuffer (primer orden) ---
-    // Magnitud escalar del gradiente Sobel 3×3 sobre la normal codificada (GBufferA.rgb).
-    // Una normal constante produce ~0; una arista o esquina produce un valor elevado.
-    float NormalGrad = ComputeSobelNormalGradient(int2(PixelCoord));
+    // --- Senal 2: puntuacion de borde de normal ---
+    // min(Dev2, Jump) vectorial sobre GBufferA.rgb. Suprime curvatura suave de esferas
+    // y objetos redondeados; detecta aristas reales y transiciones bruscas de normal.
+    float NormalGrad = ComputeNormalEdgeScore(int2(PixelCoord));
 
     // --- Puntuacion combinada y clasificacion binaria ---
     // La suma ponderada integra ambas senales sin exigir que las dos sean fuertes.
