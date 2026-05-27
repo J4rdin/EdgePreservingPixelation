@@ -29,9 +29,9 @@ static TAutoConsoleVariable<float> CVarEPPPixelSize(
 static TAutoConsoleVariable<float> CVarEPPEdgeThreshold(
     TEXT("EPP.EdgeThreshold"),
     0.05f,
-    TEXT("Umbral de discontinuidad relativa de profundidad para deteccion de bordes Sobel. "
-         "Adimensional: SobelGradient/LinearDepth > Threshold => borde. "
-         "Rango util [0.01, 0.5]: valores bajos detectan bordes suaves, altos solo geometria prominente."),
+    TEXT("Umbral aplicado sobre la puntuacion combinada de borde: "
+         "DepthWeight*GradDepthRelativo + NormalWeight*GradNormal > EdgeThreshold => borde. "
+         "Rango util [0.02, 0.5]: valores bajos detectan bordes suaves, altos solo geometria prominente."),
     ECVF_RenderThreadSafe
 );
 
@@ -44,6 +44,30 @@ static TAutoConsoleVariable<int32> CVarEPPDebugMode(
     TEXT("Modo de debug del detector de bordes. "
          "0 = pixelacion normal. "
          "1 = bordes detectados en blanco sobre negro (visualizacion Sobel aislada)."),
+    ECVF_RenderThreadSafe
+);
+
+// Peso del gradiente Sobel de profundidad relativa en la puntuacion combinada de borde.
+// La puntuacion combinada es: DepthWeight * GradDepth + NormalWeight * GradNormal.
+// Un borde visible en cualquiera de las dos senales puede superar EdgeThreshold;
+// una superficie plana oblicua (debil en ambas) se descarta.
+// Uso: EPP.DepthWeight 1.0
+static TAutoConsoleVariable<float> CVarEPPDepthWeight(
+    TEXT("EPP.DepthWeight"),
+    1.0f,
+    TEXT("Peso del gradiente Sobel de profundidad relativa en la puntuacion combinada de borde. "
+         "Valor 0 desactiva la contribucion de profundidad. Valor por defecto: 1.0."),
+    ECVF_RenderThreadSafe
+);
+
+// Peso del gradiente Sobel de normal del GBuffer (GBufferA) en la puntuacion combinada.
+// Permite detectar esquinas y cambios de superficie sin discontinuidad de profundidad.
+// Uso: EPP.NormalWeight 1.0
+static TAutoConsoleVariable<float> CVarEPPNormalWeight(
+    TEXT("EPP.NormalWeight"),
+    1.0f,
+    TEXT("Peso del gradiente Sobel de normal del GBuffer en la puntuacion combinada de borde. "
+         "Valor 0 desactiva la contribucion de normal. Valor por defecto: 1.0."),
     ECVF_RenderThreadSafe
 );
 
@@ -160,12 +184,14 @@ FScreenPassTexture FEdgePreservingPixelationViewExtension::PostProcessPass_Rende
     // para linealizar profundidad correctamente con reversed-Z y far plane infinito de UE5.
     Parameters->View = View.ViewUniformBuffer;
 
-    // SceneTextures UB — contiene SceneDepthTexture y el resto de G-Buffers accesibles
+    // SceneTextures UB — contiene SceneDepthTexture y GBufferATexture accesibles
     // desde HLSL vía SceneTexturesStruct (declarado en /Engine/Private/SceneTexturesCommon.ush).
-    // ESceneTextureSetupMode::SceneDepth enlaza solo la profundidad para minimizar la
-    // superficie de binding; el RDG gestiona la barrera DepthWrite → SRV automáticamente.
+    // Se solicitan SceneDepth y GBufferA: el primero para el Sobel de profundidad,
+    // el segundo para el Sobel de normal (deteccion de esquinas y cambios de superficie).
+    // El RDG gestiona las barreras DepthWrite→SRV y GBufferWrite→SRV automáticamente.
     Parameters->SceneTexturesStruct = CreateSceneTextureUniformBuffer(
-        GraphBuilder, View, ESceneTextureSetupMode::SceneDepth);
+        GraphBuilder, View,
+        ESceneTextureSetupMode::SceneDepth | ESceneTextureSetupMode::GBufferA);
 
     // SRVs de entrada
     Parameters->SceneColor    = GraphBuilder.CreateSRV(FRDGTextureSRVDesc(InputSceneColor.Texture));
@@ -201,11 +227,14 @@ FScreenPassTexture FEdgePreservingPixelationViewExtension::PostProcessPass_Rende
     Parameters->FrameIndex      = 0.0f;
     Parameters->Padding1        = 0.0f;
 
-    // Constant buffer — Registro 3 (Fase 3: deteccion de bordes Sobel)
-    Parameters->EdgeThreshold = FMath::Max(0.0f, CVarEPPEdgeThreshold.GetValueOnRenderThread());
-    Parameters->DebugMode     = static_cast<float>(CVarEPPDebugMode.GetValueOnRenderThread());
-    Parameters->Padding2      = 0.0f;
-    Parameters->Padding3      = 0.0f;
+    // Constant buffer — Registro 3 (Fase 3: deteccion de bordes Sobel combinado)
+    // EdgeThreshold se aplica sobre la puntuacion combinada:
+    //   CombinedScore = DepthWeight * GradDepthRelativo + NormalWeight * GradNormal
+    // Un borde fuerte en cualquiera de las dos senales puede superar el umbral.
+    Parameters->EdgeThreshold  = FMath::Max(0.0f, CVarEPPEdgeThreshold.GetValueOnRenderThread());
+    Parameters->DebugMode      = static_cast<float>(CVarEPPDebugMode.GetValueOnRenderThread());
+    Parameters->DepthWeight    = FMath::Max(0.0f, CVarEPPDepthWeight.GetValueOnRenderThread());
+    Parameters->NormalWeight   = FMath::Max(0.0f, CVarEPPNormalWeight.GetValueOnRenderThread());
 
     // -----------------------------------------------------------------------
     // Despacho del compute shader vía RDG

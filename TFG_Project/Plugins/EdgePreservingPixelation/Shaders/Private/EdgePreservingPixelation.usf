@@ -1,6 +1,23 @@
 // EdgePreservingPixelation.usf
 // TFG: Pipeline de pixelacion en tiempo real con preservacion de bordes.
-// Fase 3: Deteccion de bordes geometricos via operador Sobel sobre SceneDepth linealizado.
+// Fase 3: Deteccion de bordes geometricos via puntuacion combinada de dos senales:
+//
+//   Senal 1 — Desviacion de planaridad de profundidad (segundo orden):
+//     Para cada par de vecinos opuestos (H, V, diag1, diag2) se predice la profundidad
+//     central extrapolando linealmente: predicted = (vecino_A + vecino_B) / 2.
+//     Desviacion = |real - predicted|. Una pendiente plana produce desviacion ~0 aunque
+//     su gradiente de primer orden sea grande; un escalon real produce desviacion alta.
+//     Normalizado por la profundidad minima del vecindario 3x3 (no la del pixel central):
+//     asi la metrica es invariante a distancia pero no se diluye por el fondo lejano.
+//
+//   Senal 2 — Sobel de primer orden sobre normal del GBuffer (GBufferA.rgb):
+//     Una superficie plana oblicua tiene normal constante → gradiente ~0. Una esquina
+//     o arista entre superficies de distinta orientacion produce gradiente elevado.
+//
+//   Fusion: CombinedScore = DepthWeight * DesvPlanaridad + NormalWeight * GradNormal
+//   Borde detectado cuando CombinedScore > EdgeThreshold. La suma ponderada permite
+//   que un borde fuerte en cualquiera de las dos senales sea suficiente para superarlo.
+//
 //         Modo debug (EPP.DebugMode 1): bordes en blanco sobre negro para verificacion aislada.
 //         La mezcla adaptativa borde/centroide se implementara en Fase 4.
 //
@@ -53,7 +70,7 @@ RWTexture2D<float4> OutputTexture;
 // Registro 0 [bytes  0-15]: ViewRect
 // Registro 1 [bytes 16-31]: InverseViewSize | PixelSize | Padding0
 // Registro 2 [bytes 32-47]: TemporalJitterX | TemporalJitterY | FrameIndex | Padding1
-// Registro 3 [bytes 48-63]: EdgeThreshold | DebugMode | Padding2 | Padding3
+// Registro 3 [bytes 48-63]: EdgeThreshold | DebugMode | DepthWeight | NormalWeight
 //
 // Nota: cbuffer View{} (declarado en Common.ush) es un uniform buffer independiente
 //       enlazado por RDG desde Parameters->View = View.ViewUniformBuffer.
@@ -78,18 +95,23 @@ float   FrameIndex;
 // Relleno explicito: completa el Registro 2 a 16 bytes. Sin semantica.
 float   Padding1;
 
-// Umbral de discontinuidad relativa de profundidad para el operador Sobel.
-// Se compara contra SobelGradient/LinearDepthCenter (adimensional).
-// Rango util: [0.01, 0.5]. CVar: EPP.EdgeThreshold.
+// Umbral aplicado sobre la puntuacion combinada de borde:
+//   CombinedScore = DepthWeight * GradDepthRelativo + NormalWeight * GradNormal
+// Rango util: [0.02, 0.5]. CVar: EPP.EdgeThreshold.
 float   EdgeThreshold;
 // Selector de modo de salida:
 //   0.0 → pixelacion normal.
 //   1.0 → debug: bordes en blanco sobre negro.
 // CVar: EPP.DebugMode.
 float   DebugMode;
-// Relleno explicito: completa el Registro 3 a 16 bytes. Sin semantica.
-float   Padding2;
-float   Padding3;
+// Peso del gradiente Sobel de profundidad relativa en la puntuacion combinada.
+// Escala la desviacion de planaridad relativa (segundo orden, adimensional).
+// CVar: EPP.DepthWeight. Defecto: 1.0.
+float   DepthWeight;
+// Peso del gradiente Sobel de normal del GBuffer en la puntuacion combinada.
+// Escala el gradiente en espacio de normal codificada (rango [0,1] por canal).
+// CVar: EPP.NormalWeight. Defecto: 1.0.
+float   NormalWeight;
 
 // =============================================================================
 // Utilidades de profundidad
@@ -134,28 +156,46 @@ float SampleLinearDepth(int2 ScreenCoord)
 }
 
 // ----------------------------------------------------------------------------
-// ComputeSobelDepthGradient
+// ComputeDepthPlanarityDeviation
 //
-// Aplica el operador Sobel 3×3 centrado en PixelCoord sobre la profundidad
-// linealizada para estimar la magnitud del gradiente de profundidad en ese punto.
+// Mide la desviacion de planaridad de la profundidad centrada en PixelCoord.
+// Es un detector de bordes de segundo orden: a diferencia del Sobel (primer orden),
+// no responde a pendientes planas, solo a quiebros (discontinuidades reales).
 //
-// Kernel Sobel estandar (aproximacion de primer orden a las derivadas parciales):
+// Principio: si la superficie es localmente plana, la profundidad del pixel central
+// puede predecirse interpolando linealmente entre dos vecinos opuestos:
 //
-//   Gx = [-1  0 +1]       Gy = [-1 -2 -1]
-//        [-2  0 +2]            [ 0  0  0]
-//        [-1  0 +1]            [+1 +2 +1]
+//   predicted_center = (vecino_A + vecino_B) / 2
 //
-// La magnitud del gradiente se aproxima como |Gx| + |Gy| (norma L1).
-// Para clasificacion binaria de bordes, la norma L1 es equivalente a sqrt(Gx²+Gy²)
-// (ambas son monotonamente crecientes respecto al mismo umbral) con coste inferior.
+// La desviacion |real - predicted| es ~0 en una rampa lineal (suelo oblicuo) y
+// grande en un escalon de profundidad (borde geometrico real).
 //
-// Los vecinos se restringen al viewport (no al render target completo) para evitar
-// leer profundidad del fondo en pixels perimetrales del viewport.
+// Se evaluan 4 pares de vecinos opuestos desde p[1][1]:
+//   H  : (p[1][0], p[1][2])   horizontal
+//   V  : (p[0][1], p[2][1])   vertical
+//   D1 : (p[0][0], p[2][2])   diagonal noroeste-sureste
+//   D2 : (p[0][2], p[2][0])   diagonal noreste-suroeste
 //
-// Parametro: PixelCoord — coordenada entera absoluta en el render target [px].
-// Devuelve:  magnitud del gradiente de profundidad en unidades de mundo [cm].
+// La magnitud de la desviacion es el maximo de los cuatro ejes; el maximo preserva
+// la respuesta al eje con el escalon mas fuerte sin acumular ruido de los otros.
+//
+// Normalizacion por profundidad minima del vecindario 3×3:
+//   Desviacion relativa = Desviacion / max(MinDepth, 1.0)
+// Usar la profundidad minima (la superficie mas cercana del parche) en lugar de la
+// del pixel central resuelve dos problemas a la vez:
+//   - Invariancia a la distancia: el mismo escalon produce el mismo valor relativo
+//     independientemente de si esta a 1 m o a 100 m de la camara.
+//   - No dilucion por el fondo: en el borde superior de un objeto en primer plano,
+//     el pixel central puede ser el objeto (cercano) o el fondo (lejano) segun la
+//     posicion exacta del borde. Con MinDepth, la referencia siempre es la superficie
+//     proxima, no el fondo lejano, por lo que el escalon no se diluye.
+//
+// Parametros:
+//   PixelCoord — coordenada entera absoluta en el render target [px].
+//   OutMinDepth — profundidad lineal minima del vecindario 3×3 [cm]. Parametro de salida.
+// Devuelve: desviacion de planaridad relativa, adimensional (invariante a distancia).
 // ----------------------------------------------------------------------------
-float ComputeSobelDepthGradient(int2 PixelCoord)
+float ComputeDepthPlanarityDeviation(int2 PixelCoord, out float OutMinDepth)
 {
     // Limites inclusivos del viewport en coordenadas enteras de render target.
     int2 VPMin = int2(ViewRect.xy);
@@ -163,8 +203,9 @@ float ComputeSobelDepthGradient(int2 PixelCoord)
                       ViewRect.y + ViewRect.w - 1);
 
     // Muestreo de la cuadricula 3×3 centrada en PixelCoord.
-    // p[row][col], row/col ∈ {0,1,2} correspond al offset (dy, dx) ∈ {-1, 0, +1}.
+    // p[row][col], con row/col ∈ {0,1,2} correspondiente a offset (dy,dx) ∈ {-1,0,+1}.
     float p[3][3];
+    float MinDepth = 1.0e38f;   // acumulador del minimo de profundidad del vecindario
     [unroll]
     for (int dy = -1; dy <= 1; dy++)
     {
@@ -172,20 +213,107 @@ float ComputeSobelDepthGradient(int2 PixelCoord)
         for (int dx = -1; dx <= 1; dx++)
         {
             int2 SampleCoord = clamp(PixelCoord + int2(dx, dy), VPMin, VPMax);
-            p[dy + 1][dx + 1] = SampleLinearDepth(SampleCoord);
+            float D = SampleLinearDepth(SampleCoord);
+            p[dy + 1][dx + 1] = D;
+            MinDepth = min(MinDepth, D);
+        }
+    }
+    OutMinDepth = MinDepth;
+
+    // Desviacion de planaridad para cada par de vecinos opuestos.
+    // predicted = (A + B) / 2 → residuo = |centro - predicted| = |2*centro - A - B| / 2
+    // El factor 1/2 es constante y se absorbe en el umbral; se omite para simplificar.
+    float Center = p[1][1];
+    float DevH  = abs(2.0f * Center - p[1][0] - p[1][2]);   // eje horizontal
+    float DevV  = abs(2.0f * Center - p[0][1] - p[2][1]);   // eje vertical
+    float DevD1 = abs(2.0f * Center - p[0][0] - p[2][2]);   // diagonal NW-SE
+    float DevD2 = abs(2.0f * Center - p[0][2] - p[2][0]);   // diagonal NE-SW
+
+    // Maximo de los cuatro ejes: responde al eje con el escalon mas pronunciado.
+    float Deviation = max(max(DevH, DevV), max(DevD1, DevD2));
+
+    // Normalizacion por la profundidad minima del vecindario (ver descripcion arriba).
+    // max(..., 1.0) previene division por cero o near-zero cuando toda la escena
+    // esta a < 1 cm de la camara (imposible en la practica, pero defensivo).
+    return Deviation / max(MinDepth, 1.0f);
+}
+
+// ----------------------------------------------------------------------------
+// SampleGBufferNormal
+//
+// Lee el texel de GBufferA en la coordenada indicada y devuelve los tres canales
+// RGB como un float3. GBufferA almacena la normal de superficie codificada en
+// espacio de mundo, empaquetada como (N * 0.5 + 0.5) → rango [0,1] por canal.
+//
+// No se decodifica a normal unitaria [-1,1]: para deteccion de discontinuidades
+// basta con detectar cambios en el valor codificado; una normal constante produce
+// gradiente ~0 independientemente de la codificacion, y un cambio de orientacion
+// produce gradiente no nulo en los mismos texeles en ambas representaciones.
+//
+// Load() accede al texel exacto sin interpolacion bilineal, igual que en SampleLinearDepth.
+//
+// Parametro: ScreenCoord — coordenada entera en espacio del render target [px].
+// Devuelve:  normal codificada como float3 en rango [0,1] por canal.
+// ----------------------------------------------------------------------------
+float3 SampleGBufferNormal(int2 ScreenCoord)
+{
+    return SceneTexturesStruct.GBufferATexture.Load(int3(ScreenCoord, 0)).rgb;
+}
+
+// ----------------------------------------------------------------------------
+// ComputeSobelNormalGradient
+//
+// Aplica el operador Sobel 3×3 sobre la normal codificada del GBuffer en los tres
+// canales RGB y devuelve una magnitud escalar del gradiente de normal.
+//
+// Se aplican los kernels Sobel estandar (primer orden) por canal:
+//   Gx_rgb = convolucion horizontal Sobel sobre (r, g, b)
+//   Gy_rgb = convolucion vertical   Sobel sobre (r, g, b)
+//
+// La magnitud escalar se obtiene como la media de las normas L1 por canal:
+//   Magnitud = mean_c( |Gx_c| + |Gy_c| ) = dot(abs(Gx_rgb)+abs(Gy_rgb), (1/3, 1/3, 1/3))
+//
+// Una superficie plana (normal constante en la vecindad 3×3) produce Gx_rgb ≈ 0 y
+// Gy_rgb ≈ 0 → magnitud ≈ 0, independientemente del angulo de inclinacion respecto
+// a la camara. Primer orden es correcto aqui: no queremos segundo orden sobre la normal
+// porque dos superficies adyacentes con normales distintas deben dar gradiente alto
+// (lo que para profundidad seria un falso positivo es aqui la deteccion correcta).
+//
+// Parametro: PixelCoord — coordenada entera absoluta en el render target [px].
+// Devuelve:  magnitud escalar del gradiente de normal, adimensional [0, ~algo].
+// ----------------------------------------------------------------------------
+float ComputeSobelNormalGradient(int2 PixelCoord)
+{
+    // Limites del viewport, igual que en ComputeDepthPlanarityDeviation.
+    int2 VPMin = int2(ViewRect.xy);
+    int2 VPMax = int2(ViewRect.x + ViewRect.z - 1,
+                      ViewRect.y + ViewRect.w - 1);
+
+    // Muestreo de la cuadricula 3×3 por canal RGB.
+    float3 p[3][3];
+    [unroll]
+    for (int dy = -1; dy <= 1; dy++)
+    {
+        [unroll]
+        for (int dx = -1; dx <= 1; dx++)
+        {
+            int2 SampleCoord = clamp(PixelCoord + int2(dx, dy), VPMin, VPMax);
+            p[dy + 1][dx + 1] = SampleGBufferNormal(SampleCoord);
         }
     }
 
-    // Convoluciones Sobel: el pixel central (p[1][1]) no contribuye en ningun kernel.
-    float Gx = (-1.0f * p[0][0] + 1.0f * p[0][2])
-             + (-2.0f * p[1][0] + 2.0f * p[1][2])
-             + (-1.0f * p[2][0] + 1.0f * p[2][2]);
+    // Convoluciones Sobel por canal (float3): mismos kernels Gx, Gy que para profundidad.
+    float3 Gx = (-1.0f * p[0][0] + 1.0f * p[0][2])
+              + (-2.0f * p[1][0] + 2.0f * p[1][2])
+              + (-1.0f * p[2][0] + 1.0f * p[2][2]);
 
-    float Gy = (-1.0f * p[0][0] - 2.0f * p[0][1] - 1.0f * p[0][2])
-             + ( 1.0f * p[2][0] + 2.0f * p[2][1] + 1.0f * p[2][2]);
+    float3 Gy = (-1.0f * p[0][0] - 2.0f * p[0][1] - 1.0f * p[0][2])
+              + ( 1.0f * p[2][0] + 2.0f * p[2][1] + 1.0f * p[2][2]);
 
-    // Norma L1 como aproximacion de bajo coste a la magnitud euclidea del gradiente.
-    return abs(Gx) + abs(Gy);
+    // Magnitud escalar: media de las normas L1 por canal.
+    // dot con (1/3, 1/3, 1/3) equivale a sum/3 sin bucle explicito.
+    const float3 OneThird = float3(1.0f / 3.0f, 1.0f / 3.0f, 1.0f / 3.0f);
+    return dot(abs(Gx) + abs(Gy), OneThird);
 }
 
 // =============================================================================
@@ -232,34 +360,51 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     float4 PixelatedColor = SceneColor.SampleLevel(LinearClampSampler, QuantizedUV, 0.0f);
 
     // =========================================================================
-    // PASO 2 — Deteccion de bordes geometricos via Sobel sobre profundidad lineal
+    // PASO 2 — Deteccion de bordes geometricos via puntuacion combinada
     //
-    // El kernel Sobel se centra en el PIXEL ACTUAL (no en el centroide del bloque),
-    // porque queremos clasificar cada pixel individualmente como borde o interior,
-    // con independencia del bloque de pixelacion al que pertenezca. Esta clasificacion
-    // se usara en Fase 4 para la mezcla adaptativa borde/centroide.
+    // Cada pixel se clasifica independientemente del bloque de pixelacion al que
+    // pertenezca. La clasificacion se usara en Fase 4 para la mezcla adaptativa.
+    //
+    // Senal 1 — Desviacion de planaridad de profundidad (segundo orden):
+    //   Evalua si la profundidad del pixel central es predecible interpolando vecinos
+    //   opuestos. Una pendiente plana → desviacion ~0. Un escalon real → desviacion alta.
+    //   Normalizada por la profundidad minima del vecindario 3×3 (no la del centro):
+    //   invariante a distancia de camara, sin dilucion por el fondo lejano en bordes
+    //   donde el pixel central cae en la superficie distante.
+    //
+    // Senal 2 — Sobel de primer orden sobre normal del GBuffer (GBufferA.rgb):
+    //   Una superficie plana oblicua tiene normal constante → gradiente ~0. Una arista
+    //   real entre dos superficies de distinta orientacion → gradiente elevado.
+    //
+    // Fusion: CombinedScore = DepthWeight * DesvPlanaridad + NormalWeight * GradNormal
+    //   Un borde fuerte en cualquiera de las dos senales supera EdgeThreshold.
+    //   Un suelo oblicuo: DesvPlanaridad≈0 (plano lineal) y GradNormal≈0 (normal constante)
+    //   → CombinedScore pequeno → no se detecta como borde.
     // =========================================================================
 
-    // Profundidad lineal del pixel actual en unidades de mundo.
-    float LinearDepthCenter = SampleLinearDepth(int2(PixelCoord));
+    // --- Senal 1: desviacion de planaridad de profundidad (segundo orden) ---
+    // OutMinDepth recibe la profundidad minima del vecindario 3×3; se usa dentro de la
+    // funcion para la normalizacion. El valor devuelto ya es adimensional.
+    float MinNeighborDepth;
+    float RelativeDepthDev = ComputeDepthPlanarityDeviation(int2(PixelCoord), MinNeighborDepth);
 
-    // Magnitud del gradiente Sobel 3×3 centrado en este pixel (unidades de mundo).
-    float SobelGradient = ComputeSobelDepthGradient(int2(PixelCoord));
+    // --- Senal 2: gradiente de normal del GBuffer (primer orden) ---
+    // Magnitud escalar del gradiente Sobel 3×3 sobre la normal codificada (GBufferA.rgb).
+    // Una normal constante produce ~0; una arista o esquina produce un valor elevado.
+    float NormalGrad = ComputeSobelNormalGradient(int2(PixelCoord));
 
-    // Normalizacion del gradiente por la profundidad del pixel central.
-    // Convierte el gradiente absoluto [cm] en una discontinuidad relativa [adimensional],
-    // invariante a la distancia de camara: la misma discontinuidad geometrica produce
-    // el mismo valor relativo independientemente de si esta a 1 m o a 100 m de la camara.
-    // max(..., 1.0) previene division por cero o near-zero en pixeles muy proximos (< 1 cm).
-    float RelativeGradient = SobelGradient / max(LinearDepthCenter, 1.0f);
-
-    bool bIsEdge = (RelativeGradient > EdgeThreshold);
+    // --- Puntuacion combinada y clasificacion binaria ---
+    // La suma ponderada integra ambas senales sin exigir que las dos sean fuertes.
+    float CombinedScore = DepthWeight * RelativeDepthDev + NormalWeight * NormalGrad;
+    bool bIsEdge = (CombinedScore > EdgeThreshold);
 
     // =========================================================================
     // MODO DEBUG — Visualizacion de bordes detectados (blanco sobre negro)
     //
-    // Permite validar el detector Sobel de forma aislada, antes de integrar la
-    // mezcla adaptativa de Fase 4. Ignora completamente la pixelacion.
+    // Muestra la clasificacion binaria bIsEdge: blanco = borde, negro = interior.
+    // Permite ajustar EPP.EdgeThreshold, EPP.DepthWeight y EPP.NormalWeight en
+    // tiempo real e inspeccionar el resultado antes de integrar la mezcla adaptativa
+    // de Fase 4. Ignora completamente la pixelacion.
     // Activo via consola: EPP.DebugMode 1
     // =========================================================================
     if (DebugMode >= 0.5f)

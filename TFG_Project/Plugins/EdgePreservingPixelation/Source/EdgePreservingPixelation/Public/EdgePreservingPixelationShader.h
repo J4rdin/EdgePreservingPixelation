@@ -66,10 +66,10 @@ public:
      *              [bytes 36-39] : TemporalJitterY   (float,   4 bytes)
      *              [bytes 40-43] : FrameIndex        (float,   4 bytes)
      *              [bytes 44-47] : Padding1          (float,   4 bytes) — relleno explicito.
-     *   Registro 3 [bytes 48-51] : EdgeThreshold    (float,   4 bytes) — umbral Sobel relativo.
+     *   Registro 3 [bytes 48-51] : EdgeThreshold    (float,   4 bytes) — umbral sobre puntuacion combinada.
      *              [bytes 52-55] : DebugMode         (float,   4 bytes) — 0=normal, 1=debug bordes.
-     *              [bytes 56-59] : Padding2          (float,   4 bytes) — relleno explicito.
-     *              [bytes 60-63] : Padding3          (float,   4 bytes) — relleno explicito.
+     *              [bytes 56-59] : DepthWeight       (float,   4 bytes) — peso Sobel profundidad en suma ponderada.
+     *              [bytes 60-63] : NormalWeight      (float,   4 bytes) — peso Sobel normal en suma ponderada.
      * Total: 64 bytes = 4 registros de 16 bytes. Sin huecos implicitos.
      * Nota: SHADER_PARAMETER_STRUCT_REF(View) es un uniform buffer independiente del
      *       cbuffer $Globals; no afecta al layout de escalares descrito arriba.
@@ -130,18 +130,25 @@ public:
         SHADER_PARAMETER(float,     Padding1)
 
         // --- Constant buffer: Registro 3 (16 bytes) — introducido en Fase 3 ---
-        // Umbral de discontinuidad relativa de profundidad para el operador Sobel.
-        // Comparado contra SobelGradient / LinearDepthCenter (valor adimensional).
-        // Valor por defecto: 0.05 (5 % de variacion). CVar: EPP.EdgeThreshold.
+        // Umbral aplicado sobre la puntuacion de borde combinada:
+        //   CombinedScore = DepthWeight * GradienteDepthRelativo + NormalWeight * GradienteNormal
+        // Un borde en cualquiera de las dos senales puede superar el umbral; una superficie
+        // plana oblicua (debil en ambas senales tras normalizar) se descarta.
+        // CVar: EPP.EdgeThreshold.
         SHADER_PARAMETER(float,     EdgeThreshold)
         // Selector de modo de salida del shader:
         //   0.0 = pixelacion normal (sin debug).
         //   1.0 = debug: bordes detectados en blanco sobre negro.
         // CVar: EPP.DebugMode.
         SHADER_PARAMETER(float,     DebugMode)
-        // Relleno explicito: completa el Registro 3 a 16 bytes. Sin semantica en HLSL.
-        SHADER_PARAMETER(float,     Padding2)
-        SHADER_PARAMETER(float,     Padding3)
+        // Peso del gradiente Sobel de profundidad relativa en la puntuacion combinada.
+        // Escala el termino adimensional SobelDepth/LinearDepth.
+        // CVar: EPP.DepthWeight. Valor por defecto: 1.0.
+        SHADER_PARAMETER(float,     DepthWeight)
+        // Peso del gradiente Sobel de normal del GBuffer en la puntuacion combinada.
+        // Escala el termino de magnitud de gradiente en espacio de normal codificada [0,1].
+        // CVar: EPP.NormalWeight. Valor por defecto: 1.0.
+        SHADER_PARAMETER(float,     NormalWeight)
 
     END_SHADER_PARAMETER_STRUCT()
 
