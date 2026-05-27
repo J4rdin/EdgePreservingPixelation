@@ -1,115 +1,208 @@
 // EdgePreservingPixelation.usf
 // TFG: Pipeline de pixelacion en tiempo real con preservacion de bordes.
-// Fase 2: Cuantizacion UV (pixelacion) — sin logica de bordes aun.
+// Fase 3: Deteccion de bordes geometricos via operador Sobel sobre SceneDepth linealizado.
+//         Modo debug (EPP.DebugMode 1): bordes en blanco sobre negro para verificacion aislada.
+//         La mezcla adaptativa borde/centroide se implementara en Fase 4.
 //
 // Compatible con UE5 5.5, Shader Model 5+ (D3D12 / Vulkan).
-// Punto de entrada del Compute Shader: MainCS
-//
-// Recursos declarados en este archivo:
-//   - SceneColor    : textura de color HDR de escena (entrada).
-//   - SceneDepth    : profundidad raw en espacio de dispositivo (entrada, reservada Fase 2).
-//   - SceneVelocity : buffer de velocidad por pixel en NDC (entrada, reservada Fase 3).
-//   - OutputTexture : textura de salida escritura aleatoria (UAV).
-//
-// El motor UE5 vincula automaticamente los recursos declarados aqui con los campos
-// de igual nombre en FEdgePreservingPixelationCS::FParameters (enlazado por nombre).
-//
-// El constant buffer es generado automaticamente por el sistema de reflection de UE5
-// a partir de los campos SHADER_PARAMETER() de FParameters. El programador debe
-// garantizar que el layout HLSL (orden y tipos de variables globales) sea identico
-// al layout del struct C++ para evitar desincronizacion de offsets.
+// Punto de entrada del Compute Shader: MainCS.
 
+// Platform.ush:         macros y tipos de compatibilidad entre backends (D3D12, Vulkan, Metal).
+// Common.ush:           declara cbuffer View{} (InvDeviceZToWorldZTransform, etc.) y ConvertFromDeviceZ().
+// SceneTexturesCommon.ush: declara el uniform buffer SceneTexturesStruct (FSceneTextureUniformParameters)
+//                       y los helpers CalcSceneDepth(uint2), CalcSceneDepth(float2), etc.
+//                       Incluye Common.ush internamente; todos usan #pragma once, sin duplicaciones.
 #include "/Engine/Public/Platform.ush"
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/SceneTexturesCommon.ush"
 
 // =============================================================================
 // Recursos de entrada — Shader Resource Views (SRV)
-// Vinculados por RDG desde FParameters::SceneColor, SceneDepth, SceneVelocity.
+// Vinculados por nombre desde FEdgePreservingPixelationCS::FParameters via RDG.
 // =============================================================================
 
-// Color de escena HDR. Formato tipico: R11G11B10_FLOAT o RGBA16F.
+// Color de escena LDR post-tonemap. Formato tipico: B8G8R8A8 o R10G10B10A2.
 Texture2D          SceneColor;
 
-// Profundidad de escena en espacio de dispositivo (depth buffer raw).
-// Rango: [0,1] en D3D12 (depth reverso en UE5: 1.0=near, 0.0=far).
-// Requiere conversion con la matriz de proyeccion inversa para obtener profundidad lineal.
-// RESERVADO para Fase 2 (filtro de bordes y deteccion de discontinuidades de profundidad).
-Texture2D<float>   SceneDepth;
-
-// Buffer de velocidad por pixel. Almacena el desplazamiento de cada pixel entre frames
-// consecutivos en unidades de NDC (Normalized Device Coordinates) por frame.
-// Formato: R16G16_FLOAT. Necesario para reprojection en estabilizacion temporal.
-// RESERVADO para Fase 3 (acumulacion temporal y reduccion de aliasing temporal).
+// Buffer de velocidad por pixel en NDC/frame. Reservado para Fase 4 (estabilizacion temporal).
 Texture2D<float2>  SceneVelocity;
 
-// Sampler con filtrado bilineal y modo Clamp en todos los ejes.
-// Compartido por todos los accesos de textura del shader para minimizar el
-// uso de registros de sampler (limitados a 16 en SM5).
+// SceneDepth se accede a traves del uniform buffer SceneTexturesStruct (declarado por
+// SceneTexturesCommon.ush, enlazado desde SHADER_PARAMETER_RDG_UNIFORM_BUFFER).
+// Uso: SceneTexturesStruct.SceneDepthTexture.Load(int3(coord, 0)).r
+
+// Sampler bilineal con clamp. Usado exclusivamente para muestrear SceneColor.
+// SceneDepth se accede con Load() (muestra puntual exacta, sin interpolacion).
 SamplerState       LinearClampSampler;
 
 // =============================================================================
 // Recurso de salida — Unordered Access View (UAV)
-// Vinculado por RDG desde FParameters::OutputTexture.
 // =============================================================================
 
-// Textura de salida con acceso de escritura aleatoria. Formato: RGBA32F o RGBA16F.
-// El compute shader escribe directamente en esta textura sin blending.
+// Textura de salida con acceso de escritura aleatoria.
 RWTexture2D<float4> OutputTexture;
 
 // =============================================================================
-// Constant buffer — generado por UE5 a partir de FParameters.
-// Layout debe coincidir byte a byte con el struct C++ (ver EdgePreservingPixelationShader.h).
+// Constant buffer $Globals — generado por UE5 a partir de los campos
+// SHADER_PARAMETER() de FEdgePreservingPixelationCS::FParameters.
+//
+// El layout HLSL de variables globales debe coincidir byte a byte con el orden
+// de declaracion en FParameters (el engine no reordena; el programador garantiza
+// la alineacion con padding explicito).
 //
 // Registro 0 [bytes  0-15]: ViewRect
 // Registro 1 [bytes 16-31]: InverseViewSize | PixelSize | Padding0
 // Registro 2 [bytes 32-47]: TemporalJitterX | TemporalJitterY | FrameIndex | Padding1
+// Registro 3 [bytes 48-63]: EdgeThreshold | DebugMode | Padding2 | Padding3
+//
+// Nota: cbuffer View{} (declarado en Common.ush) es un uniform buffer independiente
+//       enlazado por RDG desde Parameters->View = View.ViewUniformBuffer.
+//       No ocupa ninguno de los registros de $Globals listados arriba.
 // =============================================================================
 
-// Region activa del viewport: [OffsetX, OffsetY, Width, Height] en pixeles.
+// Region activa del viewport en pixeles del render target: [OffsetX, OffsetY, Width, Height].
 float4  ViewRect;
 
 // Inversa del tamano del render target: (1/RTWidth, 1/RTHeight).
-// Transforma coordenadas de pixel a UV normalizadas sobre el render target completo.
+// Convierte coordenadas de pixel a UV normalizadas [0,1] sobre el render target completo.
 float2  InverseViewSize;
-
-// Tamano del bloque de pixelacion en pixeles de pantalla.
-// Ejemplo: 4.0 produce bloques visibles de 4x4 pixeles.
-// RESERVADO para Fase 2 (cuantizacion de UV al centroide del bloque).
+// Tamano del bloque de pixelacion en pixeles (ej: 8.0 → bloques 8×8).
 float   PixelSize;
-
-// Relleno de alineacion — no se usa en el shader. Completa el Registro 1 a 16 bytes.
+// Relleno explicito: completa el Registro 1 a 16 bytes. Sin semantica.
 float   Padding0;
 
-// Desplazamiento X del jitter sub-pixel (secuencia de Halton, base 2).
-// RESERVADO para Fase 3 (estabilizacion temporal).
+// Reservados para Fase 4 (estabilizacion temporal con SceneVelocity).
 float   TemporalJitterX;
-
-// Desplazamiento Y del jitter sub-pixel (secuencia de Halton, base 3).
-// RESERVADO para Fase 3 (estabilizacion temporal).
 float   TemporalJitterY;
-
-// Indice del frame actual modulo la longitud de la secuencia de acumulacion.
-// RESERVADO para Fase 3 (gestion del historial de frames).
 float   FrameIndex;
-
-// Relleno de alineacion — no se usa en el shader. Completa el Registro 2 a 16 bytes.
+// Relleno explicito: completa el Registro 2 a 16 bytes. Sin semantica.
 float   Padding1;
+
+// Umbral de discontinuidad relativa de profundidad para el operador Sobel.
+// Se compara contra SobelGradient/LinearDepthCenter (adimensional).
+// Rango util: [0.01, 0.5]. CVar: EPP.EdgeThreshold.
+float   EdgeThreshold;
+// Selector de modo de salida:
+//   0.0 → pixelacion normal.
+//   1.0 → debug: bordes en blanco sobre negro.
+// CVar: EPP.DebugMode.
+float   DebugMode;
+// Relleno explicito: completa el Registro 3 a 16 bytes. Sin semantica.
+float   Padding2;
+float   Padding3;
+
+// =============================================================================
+// Utilidades de profundidad
+// =============================================================================
+
+// ----------------------------------------------------------------------------
+// SampleLinearDepth
+//
+// Lee el device Z del texel indicado y lo convierte a profundidad lineal en
+// unidades de mundo (centimetros en UE5) usando ConvertFromDeviceZ() de Common.ush.
+//
+// Por que la formula generica es incorrecta en UE5:
+//
+//   Formula directa (direct-Z, OpenGL):  linearZ = near * far / (far - DeviceZ*(far - near))
+//   Esta formula FALLA en UE5 por dos razones independientes:
+//
+//   1) Reversed-Z: UE5 invierte el rango de profundidad respecto al estandar OpenGL.
+//      near → DeviceZ=1, far → DeviceZ=0. La formula directa calcula el reciproco
+//      incorrecto con esta convencion.
+//
+//   2) Far infinito: la proyeccion perspectiva de UE5 5.x usa far → ∞. Sustituir ∞
+//      en la formula produce una expresion indeterminada; ademas 'far' no es accesible
+//      como un float finito util desde el shader.
+//
+//   ConvertFromDeviceZ() usa View.InvDeviceZToWorldZTransform (float4), precalculado
+//   por el engine a partir de la matriz de proyeccion actual. Codifica correctamente
+//   reversed-Z, far infinito, perspectiva y ortografica sin exponer near/far al shader.
+//   Es la unica forma robusta y portable de linealizar profundidad en UE5.
+//
+// Parametro: ScreenCoord — coordenada entera en espacio del render target [px].
+// Devuelve:  profundidad lineal positiva en unidades de mundo (crece con la distancia).
+// ----------------------------------------------------------------------------
+float SampleLinearDepth(int2 ScreenCoord)
+{
+    // SceneTexturesStruct.SceneDepthTexture es el depth-stencil buffer real de escena,
+    // enlazado por el UB FSceneTextureUniformParameters (creado con ESceneTextureSetupMode::SceneDepth).
+    // Load() accede exactamente al texel indicado, sin interpolacion bilineal.
+    // Interpolar profundidad en bordes geometricos generaria valores promediados
+    // sin correspondencia geometrica, contaminando la deteccion de discontinuidades.
+    float DeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(ScreenCoord, 0)).r;
+    return ConvertFromDeviceZ(DeviceZ);
+}
+
+// ----------------------------------------------------------------------------
+// ComputeSobelDepthGradient
+//
+// Aplica el operador Sobel 3×3 centrado en PixelCoord sobre la profundidad
+// linealizada para estimar la magnitud del gradiente de profundidad en ese punto.
+//
+// Kernel Sobel estandar (aproximacion de primer orden a las derivadas parciales):
+//
+//   Gx = [-1  0 +1]       Gy = [-1 -2 -1]
+//        [-2  0 +2]            [ 0  0  0]
+//        [-1  0 +1]            [+1 +2 +1]
+//
+// La magnitud del gradiente se aproxima como |Gx| + |Gy| (norma L1).
+// Para clasificacion binaria de bordes, la norma L1 es equivalente a sqrt(Gx²+Gy²)
+// (ambas son monotonamente crecientes respecto al mismo umbral) con coste inferior.
+//
+// Los vecinos se restringen al viewport (no al render target completo) para evitar
+// leer profundidad del fondo en pixels perimetrales del viewport.
+//
+// Parametro: PixelCoord — coordenada entera absoluta en el render target [px].
+// Devuelve:  magnitud del gradiente de profundidad en unidades de mundo [cm].
+// ----------------------------------------------------------------------------
+float ComputeSobelDepthGradient(int2 PixelCoord)
+{
+    // Limites inclusivos del viewport en coordenadas enteras de render target.
+    int2 VPMin = int2(ViewRect.xy);
+    int2 VPMax = int2(ViewRect.x + ViewRect.z - 1,
+                      ViewRect.y + ViewRect.w - 1);
+
+    // Muestreo de la cuadricula 3×3 centrada en PixelCoord.
+    // p[row][col], row/col ∈ {0,1,2} correspond al offset (dy, dx) ∈ {-1, 0, +1}.
+    float p[3][3];
+    [unroll]
+    for (int dy = -1; dy <= 1; dy++)
+    {
+        [unroll]
+        for (int dx = -1; dx <= 1; dx++)
+        {
+            int2 SampleCoord = clamp(PixelCoord + int2(dx, dy), VPMin, VPMax);
+            p[dy + 1][dx + 1] = SampleLinearDepth(SampleCoord);
+        }
+    }
+
+    // Convoluciones Sobel: el pixel central (p[1][1]) no contribuye en ningun kernel.
+    float Gx = (-1.0f * p[0][0] + 1.0f * p[0][2])
+             + (-2.0f * p[1][0] + 2.0f * p[1][2])
+             + (-1.0f * p[2][0] + 1.0f * p[2][2]);
+
+    float Gy = (-1.0f * p[0][0] - 2.0f * p[0][1] - 1.0f * p[0][2])
+             + ( 1.0f * p[2][0] + 2.0f * p[2][1] + 1.0f * p[2][2]);
+
+    // Norma L1 como aproximacion de bajo coste a la magnitud euclidea del gradiente.
+    return abs(Gx) + abs(Gy);
+}
 
 // =============================================================================
 // Punto de entrada del Compute Shader
-// Grupo de hilos: 8x8 = 64 hilos por grupo (optimo para warp/wavefront de 32-64 hilos).
+// Grupo de hilos: 8×8 = 64 hilos (optimo para warp/wavefront de 32-64 hilos).
 // Los defines THREADGROUP_SIZE_X/Y se inyectan desde ModifyCompilationEnvironment.
 // =============================================================================
 
 [numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, 1)]
 void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 {
-    // DispatchThreadId.xy esta en espacio local al viewport: [0, ViewportW-1] x [0, ViewportH-1].
-    // Se suma el offset del viewport (ViewRect.xy) para obtener la coordenada en el render target.
+    // Coordenada absoluta en el render target: id local del hilo + offset del viewport.
     uint2 PixelCoord = DispatchThreadId.xy + uint2(ViewRect.xy);
 
     // Descarte temprano de hilos fuera del viewport activo.
-    // El numero de grupos se redondea hacia arriba al multiplo de THREADGROUP_SIZE;
-    // los hilos excedentes escribirian fuera de bounds sin este test.
+    // El numero de grupos de despacho se redondea hacia arriba al multiplo de
+    // THREADGROUP_SIZE; los hilos excedentes deben descartarse explicitamente.
     if (PixelCoord.x >= uint(ViewRect.x + ViewRect.z) ||
         PixelCoord.y >= uint(ViewRect.y + ViewRect.w))
     {
@@ -117,60 +210,71 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     }
 
     // =========================================================================
-    // CUANTIZACION UV — Algoritmo de pixelacion por bloques regulares
+    // PASO 1 — Cuantizacion UV (pixelacion por bloques regulares)
     //
-    // Principio: todos los pixeles que pertenecen al mismo bloque de
-    // PixelSize x PixelSize muestrean SceneColor en el centroide geometrico
-    // de ese bloque. El resultado es una imagen donde cada region rectangular
-    // muestra un color uniforme, produciendo la estetica de pixelacion retro.
+    // Todos los pixeles que pertenecen al mismo bloque de PixelSize×PixelSize
+    // muestrean SceneColor en el centroide geometrico de ese bloque, produciendo
+    // regiones de color uniforme (estetica de pixelacion retro).
     //
-    // Variables en espacio LOCAL al viewport (coordenadas [0, ViewportDim-1]):
-    //
-    //   LocalPixel         = DispatchThreadId.xy  (sin offset de ViewRect)
+    // Calculo en espacio LOCAL al viewport (coordenadas [0, ViewportDim-1]):
     //   BlockIndex         = floor(LocalPixel / PixelSize)
-    //   BlockCentroidLocal = (BlockIndex + 0.5) * PixelSize
-    //
-    //   El factor +0.5 en el centroide garantiza que el muestreo cae en el
-    //   centro geometrico del bloque y no en su esquina superior izquierda,
-    //   evitando sesgos de muestreo sistematicos cuando PixelSize es impar.
-    //
-    // Ejemplo con PixelSize = 4:
-    //   LocalPixel = (5,3) → BlockIndex = (1,0) → CentroidLocal = (6,2)
-    //   LocalPixel = (4,0) → BlockIndex = (1,0) → CentroidLocal = (6,2) [mismo bloque]
-    //   LocalPixel = (3,0) → BlockIndex = (0,0) → CentroidLocal = (2,2) [bloque distinto]
+    //   BlockCentroidLocal = (BlockIndex + 0.5) * PixelSize   (+0.5: centro geometrico)
+    //   CentroidScreen     = BlockCentroidLocal + ViewRect.xy  (espacio render target)
+    //   QuantizedUV        = (CentroidScreen + 0.5) * InverseViewSize  (UV normalizada)
     // =========================================================================
-
-    // Paso 1: Coordenada local al viewport (independiente del offset del viewport).
-    float2 LocalPixel = float2(DispatchThreadId.xy);
-
-    // Paso 2: Indice entero 2D del bloque al que pertenece este hilo.
-    float2 BlockIndex = floor(LocalPixel / PixelSize);
-
-    // Paso 3: Centroide del bloque en coordenadas locales al viewport.
+    float2 LocalPixel         = float2(DispatchThreadId.xy);
+    float2 BlockIndex         = floor(LocalPixel / PixelSize);
     float2 BlockCentroidLocal = (BlockIndex + 0.5f) * PixelSize;
+    float2 CentroidScreen     = BlockCentroidLocal + float2(ViewRect.xy);
+    float2 QuantizedUV        = (CentroidScreen + 0.5f) * InverseViewSize;
 
-    // Paso 4: Trasladar el centroide al espacio del render target completo
-    //         (re-anadir el offset del viewport).
-    float2 CentroidScreen = BlockCentroidLocal + float2(ViewRect.xy);
-
-    // Paso 5: UV normalizada [0,1] sobre el render target completo.
-    //         InverseViewSize = (1/RTWidth, 1/RTHeight).
-    //         +0.5 centra el muestreo en el interior del texel del centroide.
-    float2 QuantizedUV = (CentroidScreen + 0.5f) * InverseViewSize;
-
-    // Muestreo con LOD 0 explicito: en compute shaders las derivadas parciales
-    // (ddx/ddy) no estan disponibles, por lo que Sample() elegiria mip 0 de forma
-    // implicita pero con una advertencia del compilador. SampleLevel evita esto.
-    float4 Color = SceneColor.SampleLevel(LinearClampSampler, QuantizedUV, 0.0f);
+    // SampleLevel con LOD 0 explicito: ddx/ddy no estan disponibles en compute shaders.
+    float4 PixelatedColor = SceneColor.SampleLevel(LinearClampSampler, QuantizedUV, 0.0f);
 
     // =========================================================================
-    // FASES FUTURAS:
-    //   Fase 3 — Deteccion de bordes:
-    //     Kernel Sobel 3x3 sobre SceneDepth linealizado → gradiente de profundidad
-    //     → mezcla adaptativa entre Color del centroide y color del pixel real.
-    //   Fase 4 — Estabilizacion temporal:
-    //     Reprojection con SceneVelocity + acumulacion con historial de frames.
+    // PASO 2 — Deteccion de bordes geometricos via Sobel sobre profundidad lineal
+    //
+    // El kernel Sobel se centra en el PIXEL ACTUAL (no en el centroide del bloque),
+    // porque queremos clasificar cada pixel individualmente como borde o interior,
+    // con independencia del bloque de pixelacion al que pertenezca. Esta clasificacion
+    // se usara en Fase 4 para la mezcla adaptativa borde/centroide.
     // =========================================================================
 
-    OutputTexture[PixelCoord] = Color;
+    // Profundidad lineal del pixel actual en unidades de mundo.
+    float LinearDepthCenter = SampleLinearDepth(int2(PixelCoord));
+
+    // Magnitud del gradiente Sobel 3×3 centrado en este pixel (unidades de mundo).
+    float SobelGradient = ComputeSobelDepthGradient(int2(PixelCoord));
+
+    // Normalizacion del gradiente por la profundidad del pixel central.
+    // Convierte el gradiente absoluto [cm] en una discontinuidad relativa [adimensional],
+    // invariante a la distancia de camara: la misma discontinuidad geometrica produce
+    // el mismo valor relativo independientemente de si esta a 1 m o a 100 m de la camara.
+    // max(..., 1.0) previene division por cero o near-zero en pixeles muy proximos (< 1 cm).
+    float RelativeGradient = SobelGradient / max(LinearDepthCenter, 1.0f);
+
+    bool bIsEdge = (RelativeGradient > EdgeThreshold);
+
+    // =========================================================================
+    // MODO DEBUG — Visualizacion de bordes detectados (blanco sobre negro)
+    //
+    // Permite validar el detector Sobel de forma aislada, antes de integrar la
+    // mezcla adaptativa de Fase 4. Ignora completamente la pixelacion.
+    // Activo via consola: EPP.DebugMode 1
+    // =========================================================================
+    if (DebugMode >= 0.5f)
+    {
+        float EdgeMask = bIsEdge ? 1.0f : 0.0f;
+        OutputTexture[PixelCoord] = float4(EdgeMask, EdgeMask, EdgeMask, 1.0f);
+        return;
+    }
+
+    // =========================================================================
+    // SALIDA NORMAL — Pixelacion (sin mezcla de bordes hasta Fase 4)
+    //
+    // bIsEdge esta disponible para la mezcla adaptativa de Fase 4:
+    //   bIsEdge=true  → mostrar color real del pixel (preservar el borde).
+    //   bIsEdge=false → mostrar color del centroide del bloque (pixelacion normal).
+    // =========================================================================
+    OutputTexture[PixelCoord] = PixelatedColor;
 }

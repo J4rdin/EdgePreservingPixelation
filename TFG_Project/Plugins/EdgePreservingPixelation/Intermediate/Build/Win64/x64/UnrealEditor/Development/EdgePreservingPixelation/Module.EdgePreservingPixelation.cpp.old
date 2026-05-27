@@ -2,3 +2,4 @@
 #include "C:/Users/manur/Documents/GitHub/TFG_REPO/TFG_Project/Plugins/EdgePreservingPixelation/Intermediate/Build/Win64/x64/UnrealEditor/Development/EdgePreservingPixelation/PerModuleInline.gen.cpp"
 #include "C:/Users/manur/Documents/GitHub/TFG_REPO/TFG_Project/Plugins/EdgePreservingPixelation/Source/EdgePreservingPixelation/Private/EdgePreservingPixelationModule.cpp"
 #include "C:/Users/manur/Documents/GitHub/TFG_REPO/TFG_Project/Plugins/EdgePreservingPixelation/Source/EdgePreservingPixelation/Private/EdgePreservingPixelationShader.cpp"
+#include "C:/Users/manur/Documents/GitHub/TFG_REPO/TFG_Project/Plugins/EdgePreservingPixelation/Source/EdgePreservingPixelation/Private/EdgePreservingPixelationViewExtension.cpp"

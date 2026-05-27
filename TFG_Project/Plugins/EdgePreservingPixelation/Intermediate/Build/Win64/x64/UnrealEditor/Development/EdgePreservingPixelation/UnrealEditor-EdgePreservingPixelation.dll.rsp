@@ -39,6 +39,8 @@
 /NATVIS:"..\Intermediate\Build\Win64\x64\UnrealEditor\Development\RenderCore\RenderCore.natvis"
 "C:\Users\manur\Documents\GitHub\TFG_REPO\TFG_Project\Intermediate\Build\Win64\x64\TFG_ProjectEditor\Development\UnrealEd\SharedPCH.UnrealEd.Project.ValApi.Cpp20.h.obj"
 "C:\Users\manur\Documents\GitHub\TFG_REPO\TFG_Project\Plugins\EdgePreservingPixelation\Intermediate\Build\Win64\x64\UnrealEditor\Development\EdgePreservingPixelation\Module.EdgePreservingPixelation.cpp.obj"
+"C:\Users\manur\Documents\GitHub\TFG_REPO\TFG_Project\Plugins\EdgePreservingPixelation\Intermediate\Build\Win64\x64\UnrealEditor\Development\EdgePreservingPixelation\EdgePreservingPixelationShader.cpp.obj"
+"C:\Users\manur\Documents\GitHub\TFG_REPO\TFG_Project\Plugins\EdgePreservingPixelation\Intermediate\Build\Win64\x64\UnrealEditor\Development\EdgePreservingPixelation\EdgePreservingPixelationViewExtension.cpp.obj"
 "C:\Users\manur\Documents\GitHub\TFG_REPO\TFG_Project\Plugins\EdgePreservingPixelation\Intermediate\Build\Win64\x64\UnrealEditor\Development\EdgePreservingPixelation\Default.rc2.res"
 "..\Intermediate\Build\Win64\x64\UnrealEditor\Development\CoreUObject\UnrealEditor-CoreUObject.lib"
 "..\Intermediate\Build\Win64\x64\UnrealEditor\Development\Engine\UnrealEditor-Engine.lib"

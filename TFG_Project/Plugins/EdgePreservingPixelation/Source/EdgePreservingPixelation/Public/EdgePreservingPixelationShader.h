@@ -2,7 +2,7 @@
 // TFG: Plugin de pixelacion con preservacion de bordes.
 //
 // Declaracion del Global Shader y su estructura de parametros RDG.
-// Fase 1: Esqueleto base. Sin logica de procesamiento (Sobel, TAA, etc.).
+// Fase 3: Deteccion de bordes geometricos — SceneDepth real + cbuffer ampliado a 4 registros.
 
 #pragma once
 
@@ -11,6 +11,8 @@
 #include "ShaderParameterStruct.h"
 #include "RenderGraphResources.h"
 #include "RenderGraphUtils.h"
+#include "SceneView.h"                // FViewUniformShaderParameters — necesario para SHADER_PARAMETER_STRUCT_REF
+#include "SceneTexturesConfig.h"      // FSceneTextureUniformParameters — UB con SceneDepth real (SHADER_PARAMETER_RDG_UNIFORM_BUFFER)
 
 /**
  * FEdgePreservingPixelationCS
@@ -64,7 +66,13 @@ public:
      *              [bytes 36-39] : TemporalJitterY   (float,   4 bytes)
      *              [bytes 40-43] : FrameIndex        (float,   4 bytes)
      *              [bytes 44-47] : Padding1          (float,   4 bytes) — relleno explicito.
-     * Total: 48 bytes = 3 registros de 16 bytes. Sin huecos implicitos.
+     *   Registro 3 [bytes 48-51] : EdgeThreshold    (float,   4 bytes) — umbral Sobel relativo.
+     *              [bytes 52-55] : DebugMode         (float,   4 bytes) — 0=normal, 1=debug bordes.
+     *              [bytes 56-59] : Padding2          (float,   4 bytes) — relleno explicito.
+     *              [bytes 60-63] : Padding3          (float,   4 bytes) — relleno explicito.
+     * Total: 64 bytes = 4 registros de 16 bytes. Sin huecos implicitos.
+     * Nota: SHADER_PARAMETER_STRUCT_REF(View) es un uniform buffer independiente del
+     *       cbuffer $Globals; no afecta al layout de escalares descrito arriba.
      * -------------------------------------------------------------------------
      */
     BEGIN_SHADER_PARAMETER_STRUCT(FParameters, EDGEPRESERVINGPIXELATION_API)
@@ -75,9 +83,10 @@ public:
         // Color de escena HDR antes del tonemapping (formato tipico: R11G11B10_FLOAT o RGBA16F).
         SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D,         SceneColor)
 
-        // Profundidad de escena en espacio de dispositivo (formato: R32_FLOAT, depth raw).
-        // Requiere linealizacion mediante la matriz de proyeccion inversa (Fase 2).
-        SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float>,  SceneDepth)
+        // Uniform buffer de escena con acceso a SceneDepthTexture, GBuffers, etc.
+        // Nombre del slot HLSL: SceneTexturesStruct (convención del engine, ver SceneTexturesCommon.ush).
+        // Creado con CreateSceneTextureUniformBuffer(GraphBuilder, View, ESceneTextureSetupMode::SceneDepth).
+        SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSceneTextureUniformParameters, SceneTexturesStruct)
 
         // Buffer de velocidad por pixel en unidades de NDC/frame (formato: R16G16_FLOAT).
         // Empleado para estabilizacion temporal (reprojection) en Fase 3.
@@ -85,6 +94,12 @@ public:
 
         // Sampler compartido con filtrado bilineal y modo de direccionamiento Clamp.
         SHADER_PARAMETER_SAMPLER(SamplerState,               LinearClampSampler)
+
+        // Uniform buffer de vista de escena (cbuffer View en HLSL, declarado via Common.ush).
+        // Proporciona InvDeviceZToWorldZTransform y otros parametros de camara al shader.
+        // El RDG lo vincula automaticamente al slot de uniform buffer correcto.
+        // En C++: Parameters->View = View.ViewUniformBuffer.
+        SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
 
         // --- Recurso de salida (UAV — Unordered Access View) ---
         // El compute shader escribe el resultado pixelado directamente en este buffer.
@@ -109,10 +124,24 @@ public:
         SHADER_PARAMETER(float,     TemporalJitterX)
         // Desplazamiento Y del jitter de Halton para estabilizacion temporal (reservado Fase 3).
         SHADER_PARAMETER(float,     TemporalJitterY)
-        // Indice de frame para secuencias de acumulacion temporal (reservado Fase 3).
+        // Indice de frame para secuencias de acumulacion temporal (reservado Fase 4).
         SHADER_PARAMETER(float,     FrameIndex)
         // Relleno explicito: completa el Registro 2 a 16 bytes. Sin semantica en HLSL.
         SHADER_PARAMETER(float,     Padding1)
+
+        // --- Constant buffer: Registro 3 (16 bytes) — introducido en Fase 3 ---
+        // Umbral de discontinuidad relativa de profundidad para el operador Sobel.
+        // Comparado contra SobelGradient / LinearDepthCenter (valor adimensional).
+        // Valor por defecto: 0.05 (5 % de variacion). CVar: EPP.EdgeThreshold.
+        SHADER_PARAMETER(float,     EdgeThreshold)
+        // Selector de modo de salida del shader:
+        //   0.0 = pixelacion normal (sin debug).
+        //   1.0 = debug: bordes detectados en blanco sobre negro.
+        // CVar: EPP.DebugMode.
+        SHADER_PARAMETER(float,     DebugMode)
+        // Relleno explicito: completa el Registro 3 a 16 bytes. Sin semantica en HLSL.
+        SHADER_PARAMETER(float,     Padding2)
+        SHADER_PARAMETER(float,     Padding3)
 
     END_SHADER_PARAMETER_STRUCT()
 

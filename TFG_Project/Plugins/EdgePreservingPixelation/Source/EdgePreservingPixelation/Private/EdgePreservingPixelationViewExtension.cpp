@@ -10,6 +10,7 @@
 #include "RenderGraphBuilder.h"                      // FRDGBuilder
 #include "SceneView.h"                               // FSceneView
 #include "GlobalShader.h"                            // GetGlobalShaderMap
+#include "SceneRenderTargetParameters.h"  // CreateSceneTextureUniformBuffer, ESceneTextureSetupMode
 
 // Variable de consola para controlar el tamaño del bloque de pixelación en tiempo de ejecución.
 // ECVF_RenderThreadSafe permite leer el valor de forma segura desde el render thread.
@@ -18,6 +19,31 @@ static TAutoConsoleVariable<float> CVarEPPPixelSize(
     TEXT("EPP.PixelSize"),
     8.0f,
     TEXT("Tamanno del bloque de pixelacion en pixeles de pantalla. Minimo efectivo: 2."),
+    ECVF_RenderThreadSafe
+);
+
+// Umbral de discontinuidad relativa de profundidad para el operador Sobel.
+// Se compara contra (GradienteSobel / ProfundidadLinealCentral), valor adimensional
+// e invariante a la distancia de camara. Rango util: [0.01, 0.5].
+// Uso: EPP.EdgeThreshold 0.05
+static TAutoConsoleVariable<float> CVarEPPEdgeThreshold(
+    TEXT("EPP.EdgeThreshold"),
+    0.05f,
+    TEXT("Umbral de discontinuidad relativa de profundidad para deteccion de bordes Sobel. "
+         "Adimensional: SobelGradient/LinearDepth > Threshold => borde. "
+         "Rango util [0.01, 0.5]: valores bajos detectan bordes suaves, altos solo geometria prominente."),
+    ECVF_RenderThreadSafe
+);
+
+// Modo de debug del detector de bordes.
+// 0 = salida normal (pixelacion); 1 = bordes en blanco sobre negro.
+// Uso: EPP.DebugMode 1
+static TAutoConsoleVariable<int32> CVarEPPDebugMode(
+    TEXT("EPP.DebugMode"),
+    0,
+    TEXT("Modo de debug del detector de bordes. "
+         "0 = pixelacion normal. "
+         "1 = bordes detectados en blanco sobre negro (visualizacion Sobel aislada)."),
     ECVF_RenderThreadSafe
 );
 
@@ -108,28 +134,7 @@ FScreenPassTexture FEdgePreservingPixelationViewExtension::PostProcessPass_Rende
     );
     FRDGTextureRef OutputTexture = GraphBuilder.CreateTexture(OutputDesc, TEXT("EPP_PixelatedOutput"));
 
-    // -----------------------------------------------------------------------
-    // Texturas placeholder para SceneDepth y SceneVelocity (Fase 2).
-    // No se muestrean en el shader de esta fase; se proporcionan para satisfacer
-    // la validación RDG que exige que todos los SRV declarados en FParameters estén
-    // enlazados a recursos válidos y previamente escritos.
-    //
-    // AddClearUAVPass escribe en el recurso dentro del grafo, marcándolo como
-    // inicializado para la validación de dependencias del RDG.
-    //
-    // En Fase 3 estos placeholders serán reemplazados por los render targets reales
-    // (SceneTextures.Depth.Target y SceneTextures.Velocity).
-    // -----------------------------------------------------------------------
-    FRDGTextureRef PlaceholderDepth = GraphBuilder.CreateTexture(
-        FRDGTextureDesc::Create2D(
-            FIntPoint(1, 1),
-            PF_R32_FLOAT,
-            FClearValueBinding(0.0f),
-            TexCreate_ShaderResource | TexCreate_UAV),
-        TEXT("EPP_PlaceholderDepth")
-    );
-    AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(PlaceholderDepth), FLinearColor::Transparent);
-
+    // Velocity sigue como placeholder hasta Fase 4 (estabilización temporal).
     FRDGTextureRef PlaceholderVelocity = GraphBuilder.CreateTexture(
         FRDGTextureDesc::Create2D(
             FIntPoint(1, 1),
@@ -151,9 +156,19 @@ FScreenPassTexture FEdgePreservingPixelationViewExtension::PostProcessPass_Rende
     FEdgePreservingPixelationCS::FParameters* Parameters =
         GraphBuilder.AllocParameters<FEdgePreservingPixelationCS::FParameters>();
 
+    // View uniform buffer — proporciona InvDeviceZToWorldZTransform al HLSL (vía Common.ush)
+    // para linealizar profundidad correctamente con reversed-Z y far plane infinito de UE5.
+    Parameters->View = View.ViewUniformBuffer;
+
+    // SceneTextures UB — contiene SceneDepthTexture y el resto de G-Buffers accesibles
+    // desde HLSL vía SceneTexturesStruct (declarado en /Engine/Private/SceneTexturesCommon.ush).
+    // ESceneTextureSetupMode::SceneDepth enlaza solo la profundidad para minimizar la
+    // superficie de binding; el RDG gestiona la barrera DepthWrite → SRV automáticamente.
+    Parameters->SceneTexturesStruct = CreateSceneTextureUniformBuffer(
+        GraphBuilder, View, ESceneTextureSetupMode::SceneDepth);
+
     // SRVs de entrada
     Parameters->SceneColor    = GraphBuilder.CreateSRV(FRDGTextureSRVDesc(InputSceneColor.Texture));
-    Parameters->SceneDepth    = GraphBuilder.CreateSRV(FRDGTextureSRVDesc(PlaceholderDepth));
     Parameters->SceneVelocity = GraphBuilder.CreateSRV(FRDGTextureSRVDesc(PlaceholderVelocity));
 
     // Sampler bilineal con clamp en todos los ejes, compartido por todos los accesos del shader.
@@ -180,11 +195,17 @@ FScreenPassTexture FEdgePreservingPixelationViewExtension::PostProcessPass_Rende
     Parameters->PixelSize = PixelSizeVal;
     Parameters->Padding0  = 0.0f;
 
-    // Constant buffer — Registro 2 (reservado para Fase 3)
+    // Constant buffer — Registro 2 (reservado para Fase 4)
     Parameters->TemporalJitterX = 0.0f;
     Parameters->TemporalJitterY = 0.0f;
     Parameters->FrameIndex      = 0.0f;
     Parameters->Padding1        = 0.0f;
+
+    // Constant buffer — Registro 3 (Fase 3: deteccion de bordes Sobel)
+    Parameters->EdgeThreshold = FMath::Max(0.0f, CVarEPPEdgeThreshold.GetValueOnRenderThread());
+    Parameters->DebugMode     = static_cast<float>(CVarEPPDebugMode.GetValueOnRenderThread());
+    Parameters->Padding2      = 0.0f;
+    Parameters->Padding3      = 0.0f;
 
     // -----------------------------------------------------------------------
     // Despacho del compute shader vía RDG
