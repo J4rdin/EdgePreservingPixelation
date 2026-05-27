@@ -80,16 +80,29 @@ FScreenPassTexture FEdgePreservingPixelationViewExtension::PostProcessPass_Rende
 
     // -----------------------------------------------------------------------
     // Textura de salida intermedia
-    // UAV: necesario para la escritura RWTexture2D desde el compute shader.
-    // ShaderResource: permite leer la textura como SRV en pases posteriores.
-    // RenderTargetable: necesario para que el pipeline pueda usar la textura como
-    //   destino de rasterización en el blit final hacia el swapchain.
+    //
+    // El engine puede pre-asignar una textura de destino final (OverrideOutput)
+    // a la que debemos escribir nuestro resultado. D3D12 CopyResource exige que
+    // origen y destino tengan formato DXGI y dimensiones idénticos; si usáramos
+    // el formato de InputSceneColor (que puede diferir, p. ej. R10G10B10A2 vs
+    // B8G8R8A8), CopyResource fallaría con E_INVALIDARG.
+    //
+    // Solución: cuando OverrideOutput es válido, crear OutputTexture con su mismo
+    // formato y extensión para que la copia posterior no tenga incompatibilidades.
     // -----------------------------------------------------------------------
     const FIntPoint RTExtent = InputSceneColor.Texture->Desc.Extent;
 
+    const bool bHasOverride = InOutInputs.OverrideOutput.IsValid();
+    const EPixelFormat OutputPixelFormat = bHasOverride
+        ? InOutInputs.OverrideOutput.Texture->Desc.Format
+        : InputSceneColor.Texture->Desc.Format;
+    const FIntPoint OutputExtent = bHasOverride
+        ? InOutInputs.OverrideOutput.Texture->Desc.Extent
+        : RTExtent;
+
     const FRDGTextureDesc OutputDesc = FRDGTextureDesc::Create2D(
-        RTExtent,
-        InputSceneColor.Texture->Desc.Format,
+        OutputExtent,
+        OutputPixelFormat,
         FClearValueBinding::Black,
         TexCreate_UAV | TexCreate_ShaderResource | TexCreate_RenderTargetable
     );
@@ -194,9 +207,22 @@ FScreenPassTexture FEdgePreservingPixelationViewExtension::PostProcessPass_Rende
         FComputeShaderUtils::GetGroupCount(ViewportSize, FIntPoint(8, 8))
     );
 
-    // Devolver la textura de salida con el ViewRect original preservado.
-    // El pipeline de post-proceso usa el valor de retorno como escena de color
-    // para los pases subsiguientes; no es necesario copiar a OverrideOutput porque
-    // el view extension está registrado correctamente via OnPostEngineInit.
-    return FScreenPassTexture(OutputTexture, InputSceneColor.ViewRect);
+    // -----------------------------------------------------------------------
+    // Copia a OverrideOutput (cuando el engine pre-asigna el destino final).
+    //
+    // El engine presenta OverrideOutput directamente como salida de pantalla
+    // independientemente del FScreenPassTexture que devolvamos; si no escribimos
+    // en él, la pantalla queda negra/sin inicializar.
+    //
+    // OutputTexture se creó con el mismo formato y extensión que OverrideOutput
+    // (ver bloque anterior), por lo que D3D12 CopyResource no produce E_INVALIDARG.
+    // -----------------------------------------------------------------------
+    FRDGTextureRef FinalTexture = OutputTexture;
+    if (bHasOverride)
+    {
+        FinalTexture = InOutInputs.OverrideOutput.Texture;
+        AddCopyTexturePass(GraphBuilder, OutputTexture, FinalTexture);
+    }
+
+    return FScreenPassTexture(FinalTexture, InputSceneColor.ViewRect);
 }
