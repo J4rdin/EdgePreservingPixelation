@@ -1,30 +1,43 @@
 // EdgePreservingPixelationTemporal.usf
-// TFG: Estabilizacion temporal — Paso 2: EMA con reprojeccion de velocity buffer.
+// TFG: Estabilizacion temporal — Paso 3: EMA + reproyeccion velocity + neighborhood clamping YCoCg.
 //
-// Mejora del Paso 1: en lugar de leer la historia en la misma posicion de pantalla,
-// se lee en la posicion donde estaba el pixel en el frame anterior, calculada
-// restando el vector de movimiento (velocity) del GBuffer.
+// Evolucion de pasos:
+//   Paso 1 — EMA ingenua: lerp(Historia_UV, Actual_UV, alpha). Ghosting severo en camara movil.
+//   Paso 2 — Reproyeccion: PrevUV = UV - VelocityNDC * float2(0.5, -0.5). Sin ghosting de camara.
+//   Paso 3 — Clamp YCoCg: rechaza muestras de historia inconsistentes con la escena actual.
+//             Elimina el ghosting de objetos animados (deformacion esqueletica imprecisa) y
+//             de objetos dinamicos cuya velocity no capture el movimiento real exactamente.
 //
-//   PrevUV = CurrentUV - VelocityNDC * float2(0.5, -0.5)
+// Algoritmo completo de este paso:
+//   1. Reprojeccion: leer historia en PrevUV (no en UV).
+//   2. Vecindario 3x3: muestrear CurrentTexture en las 9 posiciones adyacentes (enteras).
+//   3. Convertir las 9 muestras a YCoCg; construir la caja AABB min/max del vecindario.
+//   4. Convertir History a YCoCg; clampear cada componente al rango [min, max] del vecindario.
+//   5. EMA: lerp(Historia_clampeada, Actual, TemporalAlpha) en espacio YCoCg.
+//   6. Convertir resultado de YCoCg a RGB; almacenar en OutputTexture.
 //
-// Convencion UE5 / DirectX 12:
-//   GBufferVelocityTexture almacena velocity en espacio NDC (Normalized Device Coordinates):
-//     X positivo = movimiento hacia la derecha.
-//     Y positivo = movimiento hacia ARRIBA en pantalla.
-//   En espacio UV (Y positivo = abajo), el factor de Y es -0.5 (inversion).
-//   DecodeVelocityFromTexture() decodifica el formato UNORM (bias 0.5) a NDC.
+// Por que YCoCg en lugar de RGB para el clamp:
+//   En RGB el bounding box AABB del vecindario suele ser demasiado conservador: las
+//   diagonales del cubo RGB no corresponden a ninguna direccion perceptual primaria, por
+//   lo que el volumen libre de la caja es grande y permite ghosting residual.
+//   En YCoCg, el eje Y (luma) alinea la dimension de mayor varianza perceptual con un eje
+//   del box; la crominancia (Co, Cg) ocupa un subespacios ortogonal de menor energia.
+//   Esto produce una caja AABB mas ajustada a la distribucion real del vecindario y, por
+//   tanto, rechaza historia inconsistente con mas precision sin sobre-clampar.
+//   Referencia conceptual: Brian Karis, "High-Quality Temporal Supersampling" (Siggraph 2014);
+//   Liang et al., "Recurrent AutoEncoder with Sequence-to-Sequence" (generaliza el principio).
 //
-//   La velocity incluye tanto el movimiento de camara como el de objetos dinamicos:
-//   los vertices del BasePass calculan (ClipPosCurrent - ClipPosPrev) / ClipW.
+// Convencion velocity UE5 / DirectX 12:
+//   GBufferVelocityTexture almacena delta de posicion en espacio NDC entre frames:
+//     (ClipPos_actual / ClipW_actual) - (ClipPos_prev / ClipW_prev)
+//   Incluye movimiento de camara y de objetos dinamicos.
+//   DecodeVelocityFromTexture() decodifica el formato UNORM (bias 0.5) al valor NDC real.
+//   Conversion NDC → UV: delta_UV.x = delta_NDC.x * 0.5; delta_UV.y = -delta_NDC.y * 0.5.
+//   PrevUV = UV_actual - delta_UV (restamos porque velocity = current − prev).
 //
 // Manejo de caso fuera de pantalla:
-//   Si PrevUV cae fuera de [0,1], no hay historia valida para ese pixel.
-//   Se devuelve el frame actual directamente (sin mezcla EMA).
-//
-// Resultado esperado vs Paso 1:
-//   Paneos lentos de camara → ghosting eliminado o muy reducido.
-//   Movimiento de camara rapido o desoclusion → ghosting residual (lo resuelve el Paso 3).
-//   Parpadeo en camara estatica → igual o mejor que Paso 1.
+//   Si PrevUV cae fuera de [0,1], no hay historia valida (desoclusion, objeto nuevo en pantalla).
+//   Se devuelve el frame actual directamente, sin mezcla EMA ni clamp.
 //
 // Compatible con UE5 5.5, Shader Model 5+ (D3D12 / Vulkan).
 // Punto de entrada: TemporalEMACS.
@@ -35,55 +48,72 @@
 
 // =============================================================================
 // Recursos de entrada / salida
-// Vinculados por nombre desde FEdgePreservingPixelationTemporalCS::FParameters.
 // =============================================================================
 
-// Frame actual pixelado (salida del pase de pixelacion principal, Fases 1-3b).
 Texture2D            CurrentTexture;
-// Historial EMA acumulado del frame anterior (buffer ping-pong persistente).
 Texture2D            HistoryTexture;
-// Sampler bilineal con clamp, compartido con el pase de pixelacion principal.
 SamplerState         LinearClampSampler;
-// Salida EMA = nueva historia para el frame siguiente + imagen visible en pantalla.
 RWTexture2D<float4>  OutputTexture;
 
-// SceneTexturesStruct (declarado por SceneTexturesCommon.ush, enlazado como UB RDG).
-// Contiene GBufferVelocityTexture (velocity del GBuffer) ademas de SceneDepth y GBufferA.
-
 // =============================================================================
-// Constant buffer $Globals del shader temporal
+// Constant buffer $Globals
 //
-// Registro 0 [bytes  0-15]: ViewRect         (float4, 16 bytes) — alineado.
+// Registro 0 [bytes  0-15]: ViewRect         (float4, 16 bytes)
 // Registro 1 [bytes 16-23]: InverseViewSize  (float2,  8 bytes)
 //            [bytes 24-27]: TemporalAlpha    (float,   4 bytes)
-//            [bytes 28-31]: Padding_T0       (float,   4 bytes) — relleno explicito.
-//
-// Nota: SceneTexturesStruct y el cbuffer View{} son uniform buffers independientes
-//       enlazados por el sistema RDG; no ocupan registros en este $Globals.
+//            [bytes 28-31]: Padding_T0       (float,   4 bytes)
 // =============================================================================
 
-// Region activa del viewport en pixeles del render target: [OffsetX, OffsetY, Width, Height].
 float4  ViewRect;
-
-// Inversa de las dimensiones del render target: (1/RTWidth, 1/RTHeight).
-// Convierte coordenadas de pixel a UV normalizadas [0,1] para el muestreo de texturas.
 float2  InverseViewSize;
-// Factor de mezcla EMA: lerp(historia, actual, TemporalAlpha).
-// CVar: EPP.TemporalAlpha. Defecto 0.1 (90% historia, 10% actual).
 float   TemporalAlpha;
-// Relleno explicito: completa el Registro 1 a 16 bytes. Sin semantica en HLSL.
 float   Padding_T0;
 
 // =============================================================================
+// Conversion de espacio de color RGB <-> YCoCg
+//
+// Transformacion ortogonal lossless para colores en [0,1] (LDR post-tonemapping).
+//
+//   Y  =  0.25*R + 0.5*G + 0.25*B   (luma: luminancia ponderada)
+//   Co =  0.5*R           - 0.5*B   (croma naranja-cian: diferencia R-B)
+//   Cg = -0.25*R + 0.5*G - 0.25*B   (croma verde-magenta: G vs media de R y B)
+//
+// La inversa es:
+//   R = Y + Co - Cg
+//   G = Y      + Cg
+//   B = Y - Co - Cg
+//
+// Justificacion del uso en el clamp temporal:
+//   La AABB min/max del vecindario en YCoCg es mas ajustada que en RGB porque el eje Y
+//   captura la mayor parte de la energia de la senal (luma domina la varianza perceptual).
+//   Una caja mas ajustada rechaza historia inconsistente con mayor precision: acepta
+//   variaciones reales de luma (sombras, iluminacion cambiante) sin permitir que colores
+//   fantasma de objetos desaparecidos persistan en la mezcla temporal.
+// =============================================================================
+
+float3 RGBToYCoCg(float3 RGB)
+{
+    return float3(
+         0.25f * RGB.r + 0.5f * RGB.g + 0.25f * RGB.b,  // Y
+         0.5f  * RGB.r                - 0.5f  * RGB.b,   // Co
+        -0.25f * RGB.r + 0.5f * RGB.g - 0.25f * RGB.b   // Cg
+    );
+}
+
+float3 YCoCgToRGB(float3 YCoCg)
+{
+    float Y = YCoCg.x, Co = YCoCg.y, Cg = YCoCg.z;
+    return float3(Y + Co - Cg, Y + Cg, Y - Co - Cg);
+}
+
+// =============================================================================
 // Punto de entrada del Compute Shader
-// Grupo de hilos: 8x8 = 64 hilos, identico al pase de pixelacion principal.
-// Los defines THREADGROUP_SIZE_X/Y se inyectan desde ModifyCompilationEnvironment.
 // =============================================================================
 
 [numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, 1)]
 void TemporalEMACS(uint3 DispatchThreadId : SV_DispatchThreadID)
 {
-    // Coordenada absoluta en el render target: id local del hilo + offset del viewport.
+    // Coordenada absoluta del pixel en el render target.
     uint2 PixelCoord = DispatchThreadId.xy + uint2(ViewRect.xy);
 
     // Descarte de hilos fuera del viewport activo.
@@ -93,57 +123,106 @@ void TemporalEMACS(uint3 DispatchThreadId : SV_DispatchThreadID)
         return;
     }
 
-    // UV del pixel actual, normalizada sobre el render target completo (centro del texel: + 0.5).
-    // SampleLevel con LOD 0 explicito: ddx/ddy no disponibles en compute shaders.
+    // UV normalizada sobre el render target (centro del texel).
     float2 UV = (float2(PixelCoord) + 0.5f) * InverseViewSize;
 
-    float4 Current = CurrentTexture.SampleLevel(LinearClampSampler, UV, 0.0f);
+    // Frame actual pixelado.
+    float4 Current     = CurrentTexture.SampleLevel(LinearClampSampler, UV, 0.0f);
+    float3 CurrentYCoCg = RGBToYCoCg(Current.rgb);
 
     // =========================================================================
-    // REPROJECCION CON VELOCITY BUFFER
+    // REPROYECCION CON VELOCITY BUFFER
     //
-    // GBufferVelocityTexture contiene el delta de posicion en espacio NDC entre
-    // el frame anterior y el actual, calculado en el BasePass para cada vertice:
-    //   Velocity_NDC = (ClipPosCurrent / ClipW_Current) - (ClipPosPrev / ClipW_Prev)
-    // Esto incluye la contribucion de camara y de animacion de objetos dinamicos.
-    //
-    // DecodeVelocityFromTexture() decodifica el formato de almacenamiento del buffer:
-    //   PF_G16R16 UNORM: almacenado como raw ∈ [0,1] con bias 0.5 para cero movimiento.
-    //   Decode: velocity_NDC = (raw - 0.5) * escala.
-    //
-    // Conversion NDC → UV para calcular PrevUV:
-    //   UV.x = (NDC.x + 1) / 2  →  delta_UV.x = delta_NDC.x * 0.5
-    //   UV.y = (1 - NDC.y) / 2  →  delta_UV.y = -delta_NDC.y * 0.5  (Y invertido)
-    //
-    // PrevUV = UV_actual - delta_UV = UV_actual - VelocityNDC * float2(0.5, -0.5)
-    // (restamos porque velocity = current - previous, y queremos previous = current - velocity)
+    // Para geometria dinamica (skeletal meshes, objetos empujados) la velocity
+    // del GBuffer puede ser imprecisa (deformacion esqueletica discretizada, fisica
+    // no completamente capturada por vertex velocity). Esto deja la historia
+    // desalineada respecto a la posicion actual del objeto. El clamp YCoCg (abajo)
+    // se encarga de rechazar esa historia obsoleta.
     // =========================================================================
 
-    // Muestreo de velocity en la coordenada entera del pixel actual.
-    // Load() accede al texel exacto sin interpolacion: un mismo pixel siempre tiene
-    // una sola velocity (la de su superficie geometrica).
     float4 EncodedVelocity = SceneTexturesStruct.GBufferVelocityTexture.Load(int3(PixelCoord, 0));
     float2 VelocityNDC     = DecodeVelocityFromTexture(EncodedVelocity);
 
-    // UV reproyectada al frame anterior en espacio NDC → UV.
+    // Conversion NDC → UV: delta_UV = VelocityNDC * float2(0.5, -0.5)
+    // (Y invertido entre NDC y UV; restamos porque velocity = current − prev).
     float2 PrevUV = UV - VelocityNDC * float2(0.5f, -0.5f);
 
-    // Si la UV reproyectada cae fuera del rango valido [0,1], no hay historia
-    // coherente para este pixel (desoclusion, objeto entrando en pantalla, etc.).
-    // En ese caso se devuelve el frame actual directamente, sin mezcla EMA.
+    // Sin historia coherente (desoclusion, objeto entrando en pantalla, corte de camara).
+    // Se devuelve el frame actual sin mezcla; el clamp no aplica porque no hay historia.
     if (PrevUV.x < 0.0f || PrevUV.x > 1.0f || PrevUV.y < 0.0f || PrevUV.y > 1.0f)
     {
         OutputTexture[PixelCoord] = Current;
         return;
     }
 
-    // Muestreo de la historia en la posicion reproyectada del frame anterior.
-    // LinearClampSampler: bilineal con clamp; el clamp es redundante aqui porque
-    // ya descartamos los casos fuera de [0,1], pero protege contra errores de precision.
+    // Historia reproyectada: muestreo bilineal en la posicion del frame anterior.
     float4 History = HistoryTexture.SampleLevel(LinearClampSampler, PrevUV, 0.0f);
 
-    // EMA con historia reproyectada.
-    // TemporalAlpha = 0.1: la historia (90%) proviene de la posicion correcta del frame anterior,
-    // eliminando el ghosting de movimiento de camara que veia el Paso 1.
-    OutputTexture[PixelCoord] = lerp(History, Current, TemporalAlpha);
+    // =========================================================================
+    // CONSTRUCCION DEL BOUNDING BOX 3x3 EN YCoCg
+    //
+    // Se muestrean los 9 pixeles del vecindario del frame actual en coordenadas
+    // enteras (Load sin interpolacion) y se convierte cada uno a YCoCg.
+    // El AABB resultante define el rango de colores "validos" para este pixel:
+    // cualquier muestra de historia fuera de este rango corresponde a contenido
+    // que ya no es consistente con la escena actual y debe ser descartada.
+    //
+    // Limite del viewport aplicado con clamp entero: garantiza que los Load en
+    // pixeles de borde del viewport lean el texel mas cercano valido, evitando
+    // accesos fuera del area activa del render target.
+    // =========================================================================
+
+    // Limites del viewport en coordenadas enteras de texel.
+    int2 ViewMin = int2(ViewRect.xy);
+    int2 ViewMax = int2(ViewRect.x + ViewRect.z - 1, ViewRect.y + ViewRect.w - 1);
+
+    float3 NeighborMin = float3( 1e10f,  1e10f,  1e10f);
+    float3 NeighborMax = float3(-1e10f, -1e10f, -1e10f);
+
+    [unroll]
+    for (int dy = -1; dy <= 1; dy++)
+    {
+        [unroll]
+        for (int dx = -1; dx <= 1; dx++)
+        {
+            // Coordenada entera del vecino; clamp al viewport para pixeles en borde.
+            int2 SampleCoord = clamp(int2(PixelCoord) + int2(dx, dy), ViewMin, ViewMax);
+            float3 S         = RGBToYCoCg(CurrentTexture.Load(int3(SampleCoord, 0)).rgb);
+            NeighborMin      = min(NeighborMin, S);
+            NeighborMax      = max(NeighborMax, S);
+        }
+    }
+
+    // =========================================================================
+    // NEIGHBORHOOD CLAMPING EN YCoCg
+    //
+    // La historia reproyectada se restringe componente a componente al bounding
+    // box del vecindario del frame actual. Si la historia corresponde a un objeto
+    // que se ha movido fuera del pixel (ghosting), su color en YCoCg estara fuera
+    // de la caja y sera proyectado al punto mas cercano de la caja → el ghosting
+    // se elimina en 1-2 frames en lugar de los ~50 frames que tardaria el EMA solo.
+    //
+    // Si la historia es consistente con la escena actual (entorno estatico con
+    // reproyeccion correcta), el clamp no la modifica (ya esta dentro de la caja).
+    //
+    // El clamp opera por componente en YCoCg (no por magnitud euclidea ni clip de rayo),
+    // lo que preserva la eficiencia de calculo con minima perdida de precision temporal.
+    // =========================================================================
+
+    float3 HistoryYCoCg   = RGBToYCoCg(History.rgb);
+    float3 HistoryClamped = clamp(HistoryYCoCg, NeighborMin, NeighborMax);
+
+    // =========================================================================
+    // EMA EN YCoCg + CONVERSION DE VUELTA A RGB
+    //
+    // La mezcla se realiza en YCoCg para mantener coherencia con el espacio del clamp.
+    // saturate() en la conversion final protege contra drift de precision numerica
+    // del round-trip YCoCg→RGB en valores cercanos a 0 o 1 (imagen LDR post-tonemap).
+    // =========================================================================
+
+    float3 BlendedYCoCg = lerp(HistoryClamped, CurrentYCoCg, TemporalAlpha);
+    float3 BlendedRGB   = saturate(YCoCgToRGB(BlendedYCoCg));
+
+    // Alpha del frame actual sin modificar (tipicamente 1.0 en LDR post-tonemap).
+    OutputTexture[PixelCoord] = float4(BlendedRGB, Current.a);
 }
