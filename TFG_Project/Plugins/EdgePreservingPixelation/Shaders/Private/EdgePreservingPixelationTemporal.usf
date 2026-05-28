@@ -30,9 +30,8 @@
 // Punto de entrada: TemporalEMACS.
 
 #include "/Engine/Public/Platform.ush"
-#include "/Engine/Private/Common.ush"                // cbuffer View{}, ConvertFromDeviceZ()
+#include "/Engine/Private/Common.ush"                // cbuffer View{}, ConvertFromDeviceZ(), DecodeVelocityFromTexture()
 #include "/Engine/Private/SceneTexturesCommon.ush"   // SceneTexturesStruct, GBufferVelocityTexture
-#include "/Engine/Private/VelocityCommon.ush"         // DecodeVelocityFromTexture()
 
 // =============================================================================
 // Recursos de entrada / salida

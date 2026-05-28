@@ -221,7 +221,7 @@ FScreenPassTexture FEdgePreservingPixelationViewExtension::PostProcessPass_Rende
     TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTexUniformBuffer =
         CreateSceneTextureUniformBuffer(
             GraphBuilder, View,
-            ESceneTextureSetupMode::SceneDepth | ESceneTextureSetupMode::GBufferA | ESceneTextureSetupMode::Velocity);
+            ESceneTextureSetupMode::SceneDepth | ESceneTextureSetupMode::GBufferA | ESceneTextureSetupMode::SceneVelocity);
     Parameters->SceneTexturesStruct = SceneTexUniformBuffer;
 
     // SRVs de entrada
