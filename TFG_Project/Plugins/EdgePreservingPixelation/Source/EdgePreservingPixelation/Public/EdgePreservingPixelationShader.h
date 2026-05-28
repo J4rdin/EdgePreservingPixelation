@@ -218,13 +218,18 @@ public:
         // Historial EMA del frame anterior (buffer ping-pong extraido con QueueTextureExtraction).
         SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D,          HistoryTexture)
         // SceneTextures UB — contiene GBufferVelocityTexture para la reprojeccion temporal (Paso 2).
-        // Se solicita con ESceneTextureSetupMode::SceneDepth|GBufferA|Velocity; el UB es compartido
+        // Se solicita con ESceneTextureSetupMode::SceneDepth|GBufferA|SceneVelocity; el UB es compartido
         // con el pase de pixelacion principal (misma TRDGUniformBufferRef, sin doble creacion).
         SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSceneTextureUniformParameters, SceneTexturesStruct)
         // Sampler bilineal con clamp, compartido con el pase principal.
         SHADER_PARAMETER_SAMPLER(SamplerState,                LinearClampSampler)
         // Salida EMA: nueva imagen visible + nueva historia para el frame siguiente.
         SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, OutputTexture)
+        // View UB — requerido porque Common.ush (incluido por SceneTexturesCommon.ush para
+        // DecodeVelocityFromTexture) declara cbuffer View. Sin este binding el sistema de
+        // parametros del engine no asigna correctamente el slot de $Globals, lo que hace
+        // que TemporalAlpha sea ignorado por el shader (lee un valor fijo de memoria no inicializada).
+        SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
 
         // --- Constant buffer: Registro 0 ---
         SHADER_PARAMETER(FVector4f, ViewRect)

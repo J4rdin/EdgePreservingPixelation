@@ -349,8 +349,11 @@ FScreenPassTexture FEdgePreservingPixelationViewExtension::PostProcessPass_Rende
             TemporalParams->CurrentTexture     = GraphBuilder.CreateSRV(FRDGTextureSRVDesc(OutputTexture));
             TemporalParams->HistoryTexture     = GraphBuilder.CreateSRV(FRDGTextureSRVDesc(HistoryReadRDG));
             // SceneTexturesStruct reutilizado del pase principal — contiene GBufferVelocityTexture
-            // para la reprojeccion temporal. El UB fue creado con ESceneTextureSetupMode::Velocity.
+            // para la reprojeccion temporal. El UB fue creado con ESceneTextureSetupMode::SceneVelocity.
             TemporalParams->SceneTexturesStruct = SceneTexUniformBuffer;
+            // View UB — necesario para que el sistema de parametros asigne $Globals correctamente;
+            // Common.ush declara cbuffer View y sin este binding el slot de TemporalAlpha se pierde.
+            TemporalParams->View               = View.ViewUniformBuffer;
             TemporalParams->LinearClampSampler =
                 TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
             TemporalParams->OutputTexture      = GraphBuilder.CreateUAV(TemporalOutput);
