@@ -1,28 +1,38 @@
 // EdgePreservingPixelationTemporal.usf
-// TFG: Estabilizacion temporal — Paso 1: mezcla EMA ingenua (sin reprojeccion).
+// TFG: Estabilizacion temporal — Paso 2: EMA con reprojeccion de velocity buffer.
 //
-// Combina el frame actual pixelado con el historial acumulado de frames anteriores
-// mediante una media exponencial movil (EMA), que reduce el parpadeo de bloques
-// en escenas estaticas al precio de ghosting en camara en movimiento.
+// Mejora del Paso 1: en lugar de leer la historia en la misma posicion de pantalla,
+// se lee en la posicion donde estaba el pixel en el frame anterior, calculada
+// restando el vector de movimiento (velocity) del GBuffer.
 //
-// EMA:  output = lerp(historia, actual, TemporalAlpha)
-//              = (1 - TemporalAlpha) * historia  +  TemporalAlpha * actual
+//   PrevUV = CurrentUV - VelocityNDC * float2(0.5, -0.5)
 //
-// Propiedades de la EMA por valor de TemporalAlpha:
-//   TemporalAlpha = 1.0  → solo el frame actual (sin acumulacion, igual que sin temporal)
-//   TemporalAlpha = 0.5  → media entre historia y actual (convergencia rapida, poco ghost)
-//   TemporalAlpha = 0.1  → historia domina (convergencia lenta, ghost severo en movimiento)
-//   TemporalAlpha = 0.0  → historia pura (imagen congelada)
+// Convencion UE5 / DirectX 12:
+//   GBufferVelocityTexture almacena velocity en espacio NDC (Normalized Device Coordinates):
+//     X positivo = movimiento hacia la derecha.
+//     Y positivo = movimiento hacia ARRIBA en pantalla.
+//   En espacio UV (Y positivo = abajo), el factor de Y es -0.5 (inversion).
+//   DecodeVelocityFromTexture() decodifica el formato UNORM (bias 0.5) a NDC.
 //
-// Checkpoint del Paso 1:
-//   Camara estatica → el parpadeo de bloques debe reducirse drasticamente.
-//   Camara en movimiento → ghosting/smearing severo es ESPERADO (confirma acumulacion).
-//   El Paso 2 anadira reprojeccion con SceneVelocity para corregir el movimiento.
+//   La velocity incluye tanto el movimiento de camara como el de objetos dinamicos:
+//   los vertices del BasePass calculan (ClipPosCurrent - ClipPosPrev) / ClipW.
+//
+// Manejo de caso fuera de pantalla:
+//   Si PrevUV cae fuera de [0,1], no hay historia valida para ese pixel.
+//   Se devuelve el frame actual directamente (sin mezcla EMA).
+//
+// Resultado esperado vs Paso 1:
+//   Paneos lentos de camara → ghosting eliminado o muy reducido.
+//   Movimiento de camara rapido o desoclusion → ghosting residual (lo resuelve el Paso 3).
+//   Parpadeo en camara estatica → igual o mejor que Paso 1.
 //
 // Compatible con UE5 5.5, Shader Model 5+ (D3D12 / Vulkan).
 // Punto de entrada: TemporalEMACS.
 
 #include "/Engine/Public/Platform.ush"
+#include "/Engine/Private/Common.ush"                // cbuffer View{}, ConvertFromDeviceZ()
+#include "/Engine/Private/SceneTexturesCommon.ush"   // SceneTexturesStruct, GBufferVelocityTexture
+#include "/Engine/Private/VelocityCommon.ush"         // DecodeVelocityFromTexture()
 
 // =============================================================================
 // Recursos de entrada / salida
@@ -33,10 +43,13 @@
 Texture2D            CurrentTexture;
 // Historial EMA acumulado del frame anterior (buffer ping-pong persistente).
 Texture2D            HistoryTexture;
-// Sampler bilineal con clamp. Suaviza los accesos UV en los bordes del render target.
+// Sampler bilineal con clamp, compartido con el pase de pixelacion principal.
 SamplerState         LinearClampSampler;
 // Salida EMA = nueva historia para el frame siguiente + imagen visible en pantalla.
 RWTexture2D<float4>  OutputTexture;
+
+// SceneTexturesStruct (declarado por SceneTexturesCommon.ush, enlazado como UB RDG).
+// Contiene GBufferVelocityTexture (velocity del GBuffer) ademas de SceneDepth y GBufferA.
 
 // =============================================================================
 // Constant buffer $Globals del shader temporal
@@ -45,6 +58,9 @@ RWTexture2D<float4>  OutputTexture;
 // Registro 1 [bytes 16-23]: InverseViewSize  (float2,  8 bytes)
 //            [bytes 24-27]: TemporalAlpha    (float,   4 bytes)
 //            [bytes 28-31]: Padding_T0       (float,   4 bytes) — relleno explicito.
+//
+// Nota: SceneTexturesStruct y el cbuffer View{} son uniform buffers independientes
+//       enlazados por el sistema RDG; no ocupan registros en este $Globals.
 // =============================================================================
 
 // Region activa del viewport en pixeles del render target: [OffsetX, OffsetY, Width, Height].
@@ -78,15 +94,57 @@ void TemporalEMACS(uint3 DispatchThreadId : SV_DispatchThreadID)
         return;
     }
 
-    // UV normalizada sobre el render target (centro del texel: + 0.5 antes de escalar).
+    // UV del pixel actual, normalizada sobre el render target completo (centro del texel: + 0.5).
     // SampleLevel con LOD 0 explicito: ddx/ddy no disponibles en compute shaders.
     float2 UV = (float2(PixelCoord) + 0.5f) * InverseViewSize;
 
     float4 Current = CurrentTexture.SampleLevel(LinearClampSampler, UV, 0.0f);
-    float4 History = HistoryTexture.SampleLevel(LinearClampSampler, UV, 0.0f);
 
-    // EMA: reduce el parpadeo acumulando informacion de frames anteriores.
-    // La constante de tiempo efectiva es aproximadamente 1/TemporalAlpha frames:
-    // con alpha=0.1, el sistema converge al 63% del nuevo valor en ~10 frames.
+    // =========================================================================
+    // REPROJECCION CON VELOCITY BUFFER
+    //
+    // GBufferVelocityTexture contiene el delta de posicion en espacio NDC entre
+    // el frame anterior y el actual, calculado en el BasePass para cada vertice:
+    //   Velocity_NDC = (ClipPosCurrent / ClipW_Current) - (ClipPosPrev / ClipW_Prev)
+    // Esto incluye la contribucion de camara y de animacion de objetos dinamicos.
+    //
+    // DecodeVelocityFromTexture() decodifica el formato de almacenamiento del buffer:
+    //   PF_G16R16 UNORM: almacenado como raw ∈ [0,1] con bias 0.5 para cero movimiento.
+    //   Decode: velocity_NDC = (raw - 0.5) * escala.
+    //
+    // Conversion NDC → UV para calcular PrevUV:
+    //   UV.x = (NDC.x + 1) / 2  →  delta_UV.x = delta_NDC.x * 0.5
+    //   UV.y = (1 - NDC.y) / 2  →  delta_UV.y = -delta_NDC.y * 0.5  (Y invertido)
+    //
+    // PrevUV = UV_actual - delta_UV = UV_actual - VelocityNDC * float2(0.5, -0.5)
+    // (restamos porque velocity = current - previous, y queremos previous = current - velocity)
+    // =========================================================================
+
+    // Muestreo de velocity en la coordenada entera del pixel actual.
+    // Load() accede al texel exacto sin interpolacion: un mismo pixel siempre tiene
+    // una sola velocity (la de su superficie geometrica).
+    float4 EncodedVelocity = SceneTexturesStruct.GBufferVelocityTexture.Load(int3(PixelCoord, 0));
+    float2 VelocityNDC     = DecodeVelocityFromTexture(EncodedVelocity);
+
+    // UV reproyectada al frame anterior en espacio NDC → UV.
+    float2 PrevUV = UV - VelocityNDC * float2(0.5f, -0.5f);
+
+    // Si la UV reproyectada cae fuera del rango valido [0,1], no hay historia
+    // coherente para este pixel (desoclusion, objeto entrando en pantalla, etc.).
+    // En ese caso se devuelve el frame actual directamente, sin mezcla EMA.
+    if (PrevUV.x < 0.0f || PrevUV.x > 1.0f || PrevUV.y < 0.0f || PrevUV.y > 1.0f)
+    {
+        OutputTexture[PixelCoord] = Current;
+        return;
+    }
+
+    // Muestreo de la historia en la posicion reproyectada del frame anterior.
+    // LinearClampSampler: bilineal con clamp; el clamp es redundante aqui porque
+    // ya descartamos los casos fuera de [0,1], pero protege contra errores de precision.
+    float4 History = HistoryTexture.SampleLevel(LinearClampSampler, PrevUV, 0.0f);
+
+    // EMA con historia reproyectada.
+    // TemporalAlpha = 0.1: la historia (90%) proviene de la posicion correcta del frame anterior,
+    // eliminando el ghosting de movimiento de camara que veia el Paso 1.
     OutputTexture[PixelCoord] = lerp(History, Current, TemporalAlpha);
 }

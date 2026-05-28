@@ -212,14 +212,17 @@ FScreenPassTexture FEdgePreservingPixelationViewExtension::PostProcessPass_Rende
     // para linealizar profundidad correctamente con reversed-Z y far plane infinito de UE5.
     Parameters->View = View.ViewUniformBuffer;
 
-    // SceneTextures UB — contiene SceneDepthTexture y GBufferATexture accesibles
-    // desde HLSL vía SceneTexturesStruct (declarado en /Engine/Private/SceneTexturesCommon.ush).
-    // Se solicitan SceneDepth y GBufferA: el primero para el Sobel de profundidad,
-    // el segundo para el Sobel de normal (deteccion de esquinas y cambios de superficie).
-    // El RDG gestiona las barreras DepthWrite→SRV y GBufferWrite→SRV automáticamente.
-    Parameters->SceneTexturesStruct = CreateSceneTextureUniformBuffer(
-        GraphBuilder, View,
-        ESceneTextureSetupMode::SceneDepth | ESceneTextureSetupMode::GBufferA);
+    // SceneTextures UB — contiene SceneDepthTexture, GBufferATexture y GBufferVelocityTexture.
+    // Se almacena en una variable local para reutilizarlo tanto en el pase de pixelacion
+    // principal (SceneDepth + GBufferA para el Sobel) como en el pase temporal (Velocity
+    // para la reprojeccion del Paso 2). Crear el UB dos veces no seria incorrecto pero
+    // generaria trabajo redundante; compartir la misma TRDGUniformBufferRef es lo correcto.
+    // El RDG gestiona las barreras (DepthWrite→SRV, GBufferWrite→SRV) automaticamente.
+    TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTexUniformBuffer =
+        CreateSceneTextureUniformBuffer(
+            GraphBuilder, View,
+            ESceneTextureSetupMode::SceneDepth | ESceneTextureSetupMode::GBufferA | ESceneTextureSetupMode::Velocity);
+    Parameters->SceneTexturesStruct = SceneTexUniformBuffer;
 
     // SRVs de entrada
     Parameters->SceneColor    = GraphBuilder.CreateSRV(FRDGTextureSRVDesc(InputSceneColor.Texture));
@@ -343,11 +346,14 @@ FScreenPassTexture FEdgePreservingPixelationViewExtension::PostProcessPass_Rende
             FEdgePreservingPixelationTemporalCS::FParameters* TemporalParams =
                 GraphBuilder.AllocParameters<FEdgePreservingPixelationTemporalCS::FParameters>();
 
-            TemporalParams->CurrentTexture    = GraphBuilder.CreateSRV(FRDGTextureSRVDesc(OutputTexture));
-            TemporalParams->HistoryTexture    = GraphBuilder.CreateSRV(FRDGTextureSRVDesc(HistoryReadRDG));
+            TemporalParams->CurrentTexture     = GraphBuilder.CreateSRV(FRDGTextureSRVDesc(OutputTexture));
+            TemporalParams->HistoryTexture     = GraphBuilder.CreateSRV(FRDGTextureSRVDesc(HistoryReadRDG));
+            // SceneTexturesStruct reutilizado del pase principal — contiene GBufferVelocityTexture
+            // para la reprojeccion temporal. El UB fue creado con ESceneTextureSetupMode::Velocity.
+            TemporalParams->SceneTexturesStruct = SceneTexUniformBuffer;
             TemporalParams->LinearClampSampler =
                 TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
-            TemporalParams->OutputTexture     = GraphBuilder.CreateUAV(TemporalOutput);
+            TemporalParams->OutputTexture      = GraphBuilder.CreateUAV(TemporalOutput);
 
             TemporalParams->ViewRect = FVector4f(
                 static_cast<float>(ViewRect.Min.X), static_cast<float>(ViewRect.Min.Y),

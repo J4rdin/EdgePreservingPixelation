@@ -217,6 +217,10 @@ public:
         SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D,          CurrentTexture)
         // Historial EMA del frame anterior (buffer ping-pong extraido con QueueTextureExtraction).
         SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D,          HistoryTexture)
+        // SceneTextures UB — contiene GBufferVelocityTexture para la reprojeccion temporal (Paso 2).
+        // Se solicita con ESceneTextureSetupMode::SceneDepth|GBufferA|Velocity; el UB es compartido
+        // con el pase de pixelacion principal (misma TRDGUniformBufferRef, sin doble creacion).
+        SHADER_PARAMETER_RDG_UNIFORM_BUFFER(FSceneTextureUniformParameters, SceneTexturesStruct)
         // Sampler bilineal con clamp, compartido con el pase principal.
         SHADER_PARAMETER_SAMPLER(SamplerState,                LinearClampSampler)
         // Salida EMA: nueva imagen visible + nueva historia para el frame siguiente.
