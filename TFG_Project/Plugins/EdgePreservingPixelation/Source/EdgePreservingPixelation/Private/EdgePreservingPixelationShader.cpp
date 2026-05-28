@@ -20,3 +20,15 @@ IMPLEMENT_GLOBAL_SHADER(
     "MainCS",
     SF_Compute
 );
+
+// Registra FEdgePreservingPixelationTemporalCS — pase de estabilizacion EMA (Fase 4).
+// Punto de entrada: TemporalEMACS en EdgePreservingPixelationTemporal.usf.
+// El archivo .usf separado evita colisiones de nombres de globales entre el pase
+// principal (SceneColor, OutputTexture, etc.) y el pase temporal (CurrentTexture,
+// HistoryTexture, OutputTexture con el mismo nombre de slot pero shader distinto).
+IMPLEMENT_GLOBAL_SHADER(
+    FEdgePreservingPixelationTemporalCS,
+    "/Plugin/EdgePreservingPixelation/Private/EdgePreservingPixelationTemporal.usf",
+    "TemporalEMACS",
+    SF_Compute
+);

@@ -177,3 +177,72 @@ public:
         OutEnvironment.SetDefine(TEXT("THREADGROUP_SIZE_Y"), 8);
     }
 };
+
+/**
+ * FEdgePreservingPixelationTemporalCS
+ *
+ * Compute Shader para la estabilizacion temporal mediante EMA (Fase 4 / Paso 1).
+ *
+ * Combina el frame actual pixelado con el historial acumulado del frame anterior
+ * mediante una media exponencial movil:
+ *   output = lerp(HistoryTexture, CurrentTexture, TemporalAlpha)
+ *
+ * El ping-pong de buffers de historia (dos TRefCountPtr<IPooledRenderTarget>)
+ * es gestionado en FEdgePreservingPixelationViewExtension y persiste entre frames
+ * mediante GraphBuilder.QueueTextureExtraction().
+ *
+ * Paso 1 (EMA ingenua): sin reprojeccion con SceneVelocity, sin neighborhood clamping.
+ * El ghosting severo en camara en movimiento es esperado y diagnostico en este paso.
+ * Los Pasos 2 y 3 anadiran reprojeccion y YCoCg clamping respectivamente.
+ */
+class EDGEPRESERVINGPIXELATION_API FEdgePreservingPixelationTemporalCS : public FGlobalShader
+{
+public:
+    DECLARE_GLOBAL_SHADER(FEdgePreservingPixelationTemporalCS);
+    SHADER_USE_PARAMETER_STRUCT(FEdgePreservingPixelationTemporalCS, FGlobalShader);
+
+    /**
+     * FParameters
+     *
+     * Layout del constant buffer (solo escalares — recursos en descriptor heap aparte):
+     *   Registro 0 [bytes  0-15]: ViewRect        (float4, 16 bytes)
+     *   Registro 1 [bytes 16-23]: InverseViewSize (float2,  8 bytes)
+     *              [bytes 24-27]: TemporalAlpha   (float,   4 bytes)
+     *              [bytes 28-31]: Padding_T0      (float,   4 bytes) — relleno explicito
+     * Total: 32 bytes = 2 registros de 16 bytes. Sin huecos implicitos.
+     */
+    BEGIN_SHADER_PARAMETER_STRUCT(FParameters, EDGEPRESERVINGPIXELATION_API)
+
+        // Frame actual pixelado (salida del pase de pixelacion principal).
+        SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D,          CurrentTexture)
+        // Historial EMA del frame anterior (buffer ping-pong extraido con QueueTextureExtraction).
+        SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D,          HistoryTexture)
+        // Sampler bilineal con clamp, compartido con el pase principal.
+        SHADER_PARAMETER_SAMPLER(SamplerState,                LinearClampSampler)
+        // Salida EMA: nueva imagen visible + nueva historia para el frame siguiente.
+        SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, OutputTexture)
+
+        // --- Constant buffer: Registro 0 ---
+        SHADER_PARAMETER(FVector4f, ViewRect)
+
+        // --- Constant buffer: Registro 1 ---
+        SHADER_PARAMETER(FVector2f, InverseViewSize)
+        SHADER_PARAMETER(float,     TemporalAlpha)
+        SHADER_PARAMETER(float,     Padding_T0)
+
+    END_SHADER_PARAMETER_STRUCT()
+
+    static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+    {
+        return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
+    }
+
+    static void ModifyCompilationEnvironment(
+        const FGlobalShaderPermutationParameters& Parameters,
+        FShaderCompilerEnvironment& OutEnvironment)
+    {
+        FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+        OutEnvironment.SetDefine(TEXT("THREADGROUP_SIZE_X"), 8);
+        OutEnvironment.SetDefine(TEXT("THREADGROUP_SIZE_Y"), 8);
+    }
+};

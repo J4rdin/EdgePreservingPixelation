@@ -8,6 +8,7 @@
 
 #include "CoreMinimal.h"
 #include "SceneViewExtension.h"
+#include "RenderTargetPool.h"    // IPooledRenderTarget, TRefCountPtr<IPooledRenderTarget>
 
 // Declaraciones anticipadas: evita incluir ScreenPass.h (Renderer) en un header
 // público, lo que arrastraría CanvasTypes.h y corrompería el orden del PCH.
@@ -86,4 +87,31 @@ private:
         FRDGBuilder& GraphBuilder,
         const FSceneView& View,
         const FPostProcessMaterialInputs& InOutInputs);
+
+    // -----------------------------------------------------------------------
+    // Ping-pong de buffers de historia — Fase 4 (estabilizacion temporal EMA)
+    //
+    // HistoryRT[HistoryReadIndex]   : historia del frame anterior (lectura SRV).
+    // HistoryRT[1-HistoryReadIndex] : nueva historia del frame actual (escritura UAV).
+    //
+    // La extraccion via GraphBuilder.QueueTextureExtraction() persiste los buffers
+    // fuera del grafo de render, garantizando que sobreviven entre frames.
+    // El intercambio de indices (swap del ping-pong) ocurre en PostProcessPass_RenderThread
+    // despues de llamar a QueueTextureExtraction, para que el frame siguiente sepa
+    // de que buffer leer.
+    //
+    // bHistoryValid:  false en el primer frame y tras cambios de resolucion/formato.
+    // HistorySize:    resolucion de los buffers actuales — invalida si cambia.
+    // HistoryFormat:  formato de pixel de los buffers — invalida si cambia (puede ocurrir
+    //                 si bHasOverride cambia entre frames, p.ej. al entrar/salir de PIE).
+    //
+    // NOTA: la implementacion actual asume un solo viewport activo. Con multiples vistas
+    // (split-screen) el historial se compartiria incorrectamente; se puede extender
+    // indexando por FSceneViewState si fuera necesario en el futuro.
+    // -----------------------------------------------------------------------
+    TRefCountPtr<IPooledRenderTarget> HistoryRT[2];
+    int32        HistoryReadIndex = 0;
+    bool         bHistoryValid    = false;
+    FIntPoint    HistorySize      = FIntPoint::ZeroValue;
+    EPixelFormat HistoryFormat    = PF_Unknown;
 };

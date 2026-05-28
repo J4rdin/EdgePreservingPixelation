@@ -1,0 +1,92 @@
+// EdgePreservingPixelationTemporal.usf
+// TFG: Estabilizacion temporal — Paso 1: mezcla EMA ingenua (sin reprojeccion).
+//
+// Combina el frame actual pixelado con el historial acumulado de frames anteriores
+// mediante una media exponencial movil (EMA), que reduce el parpadeo de bloques
+// en escenas estaticas al precio de ghosting en camara en movimiento.
+//
+// EMA:  output = lerp(historia, actual, TemporalAlpha)
+//              = (1 - TemporalAlpha) * historia  +  TemporalAlpha * actual
+//
+// Propiedades de la EMA por valor de TemporalAlpha:
+//   TemporalAlpha = 1.0  → solo el frame actual (sin acumulacion, igual que sin temporal)
+//   TemporalAlpha = 0.5  → media entre historia y actual (convergencia rapida, poco ghost)
+//   TemporalAlpha = 0.1  → historia domina (convergencia lenta, ghost severo en movimiento)
+//   TemporalAlpha = 0.0  → historia pura (imagen congelada)
+//
+// Checkpoint del Paso 1:
+//   Camara estatica → el parpadeo de bloques debe reducirse drasticamente.
+//   Camara en movimiento → ghosting/smearing severo es ESPERADO (confirma acumulacion).
+//   El Paso 2 anadira reprojeccion con SceneVelocity para corregir el movimiento.
+//
+// Compatible con UE5 5.5, Shader Model 5+ (D3D12 / Vulkan).
+// Punto de entrada: TemporalEMACS.
+
+#include "/Engine/Public/Platform.ush"
+
+// =============================================================================
+// Recursos de entrada / salida
+// Vinculados por nombre desde FEdgePreservingPixelationTemporalCS::FParameters.
+// =============================================================================
+
+// Frame actual pixelado (salida del pase de pixelacion principal, Fases 1-3b).
+Texture2D            CurrentTexture;
+// Historial EMA acumulado del frame anterior (buffer ping-pong persistente).
+Texture2D            HistoryTexture;
+// Sampler bilineal con clamp. Suaviza los accesos UV en los bordes del render target.
+SamplerState         LinearClampSampler;
+// Salida EMA = nueva historia para el frame siguiente + imagen visible en pantalla.
+RWTexture2D<float4>  OutputTexture;
+
+// =============================================================================
+// Constant buffer $Globals del shader temporal
+//
+// Registro 0 [bytes  0-15]: ViewRect         (float4, 16 bytes) — alineado.
+// Registro 1 [bytes 16-23]: InverseViewSize  (float2,  8 bytes)
+//            [bytes 24-27]: TemporalAlpha    (float,   4 bytes)
+//            [bytes 28-31]: Padding_T0       (float,   4 bytes) — relleno explicito.
+// =============================================================================
+
+// Region activa del viewport en pixeles del render target: [OffsetX, OffsetY, Width, Height].
+float4  ViewRect;
+
+// Inversa de las dimensiones del render target: (1/RTWidth, 1/RTHeight).
+// Convierte coordenadas de pixel a UV normalizadas [0,1] para el muestreo de texturas.
+float2  InverseViewSize;
+// Factor de mezcla EMA: lerp(historia, actual, TemporalAlpha).
+// CVar: EPP.TemporalAlpha. Defecto 0.1 (90% historia, 10% actual).
+float   TemporalAlpha;
+// Relleno explicito: completa el Registro 1 a 16 bytes. Sin semantica en HLSL.
+float   Padding_T0;
+
+// =============================================================================
+// Punto de entrada del Compute Shader
+// Grupo de hilos: 8x8 = 64 hilos, identico al pase de pixelacion principal.
+// Los defines THREADGROUP_SIZE_X/Y se inyectan desde ModifyCompilationEnvironment.
+// =============================================================================
+
+[numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, 1)]
+void TemporalEMACS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    // Coordenada absoluta en el render target: id local del hilo + offset del viewport.
+    uint2 PixelCoord = DispatchThreadId.xy + uint2(ViewRect.xy);
+
+    // Descarte de hilos fuera del viewport activo.
+    if (PixelCoord.x >= uint(ViewRect.x + ViewRect.z) ||
+        PixelCoord.y >= uint(ViewRect.y + ViewRect.w))
+    {
+        return;
+    }
+
+    // UV normalizada sobre el render target (centro del texel: + 0.5 antes de escalar).
+    // SampleLevel con LOD 0 explicito: ddx/ddy no disponibles en compute shaders.
+    float2 UV = (float2(PixelCoord) + 0.5f) * InverseViewSize;
+
+    float4 Current = CurrentTexture.SampleLevel(LinearClampSampler, UV, 0.0f);
+    float4 History = HistoryTexture.SampleLevel(LinearClampSampler, UV, 0.0f);
+
+    // EMA: reduce el parpadeo acumulando informacion de frames anteriores.
+    // La constante de tiempo efectiva es aproximadamente 1/TemporalAlpha frames:
+    // con alpha=0.1, el sistema converge al 63% del nuevo valor en ~10 frames.
+    OutputTexture[PixelCoord] = lerp(History, Current, TemporalAlpha);
+}

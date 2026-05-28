@@ -6,7 +6,7 @@
 
 #include "ScreenPass.h"                              // FScreenPassTexture — incluido aquí, no en el .h público
 #include "PostProcess/PostProcessMaterialInputs.h"  // FPostProcessMaterialInputs, EPostProcessMaterialInput
-#include "RenderGraphUtils.h"                        // FComputeShaderUtils::AddPass, AddClearUAVPass
+#include "RenderGraphUtils.h"                        // FComputeShaderUtils::AddPass, AddClearUAVPass, AddCopyTexturePass
 #include "RenderGraphBuilder.h"                      // FRDGBuilder
 #include "SceneView.h"                               // FSceneView
 #include "GlobalShader.h"                            // GetGlobalShaderMap
@@ -68,6 +68,34 @@ static TAutoConsoleVariable<float> CVarEPPNormalWeight(
     1.0f,
     TEXT("Peso del gradiente Sobel de normal del GBuffer en la puntuacion combinada de borde. "
          "Valor 0 desactiva la contribucion de normal. Valor por defecto: 1.0."),
+    ECVF_RenderThreadSafe
+);
+
+// Activacion del pase de estabilizacion temporal EMA (Fase 4).
+// 0 = desactivado (pixelacion pura, Fases 1-3b — util para comparar en ablacion).
+// 1 = activo (Paso 1: EMA ingenua sin reprojeccion).
+// Uso: EPP.EnableTemporal 0
+static TAutoConsoleVariable<int32> CVarEPPEnableTemporal(
+    TEXT("EPP.EnableTemporal"),
+    1,
+    TEXT("Activa la estabilizacion temporal EMA (Fase 4). "
+         "0 = desactivado (pixelacion pura, para ablacion). "
+         "1 = activo (EMA sin reprojeccion, Paso 1)."),
+    ECVF_RenderThreadSafe
+);
+
+// Factor de mezcla de la EMA temporal.
+// output = lerp(historia, actual, TemporalAlpha).
+// Valores bajos: historia domina, mayor estabilidad pero ghosting mas largo.
+// Valores altos: actual domina, ghosting breve pero menor reduccion de parpadeo.
+// Uso: EPP.TemporalAlpha 0.1
+static TAutoConsoleVariable<float> CVarEPPTemporalAlpha(
+    TEXT("EPP.TemporalAlpha"),
+    0.1f,
+    TEXT("Factor de mezcla EMA temporal: output = lerp(historia, actual, alpha). "
+         "1.0 = solo frame actual (sin historia). "
+         "0.0 = historia pura (imagen congelada). "
+         "Defecto: 0.1 (90% historia, 10% actual — constante de tiempo ~10 frames)."),
     ECVF_RenderThreadSafe
 );
 
@@ -258,20 +286,126 @@ FScreenPassTexture FEdgePreservingPixelationViewExtension::PostProcessPass_Rende
     );
 
     // -----------------------------------------------------------------------
-    // Copia a OverrideOutput (cuando el engine pre-asigna el destino final).
+    // FASE 4 — Estabilizacion temporal EMA (Paso 1: sin reprojeccion)
     //
-    // El engine presenta OverrideOutput directamente como salida de pantalla
-    // independientemente del FScreenPassTexture que devolvamos; si no escribimos
-    // en él, la pantalla queda negra/sin inicializar.
+    // FinalTexture es la textura que se presentara al engine (y se copiara a
+    // OverrideOutput si bHasOverride). Por defecto es OutputTexture (sin temporal);
+    // si el pase temporal se ejecuta, pasa a ser TemporalOutput.
     //
-    // OutputTexture se creó con el mismo formato y extensión que OverrideOutput
-    // (ver bloque anterior), por lo que D3D12 CopyResource no produce E_INVALIDARG.
+    // Ping-pong de historia:
+    //   HistoryReadIndex     → buffer del frame anterior (SRV de lectura).
+    //   1 - HistoryReadIndex → buffer del frame actual (extraido con QueueTextureExtraction).
+    //
+    // HistoryRT[WriteIndex] se puebla en este frame y sera el HistoryReadIndex del siguiente.
+    // QueueTextureExtraction ejecuta la copia fuera del RDG, cuando el frame termina,
+    // garantizando que la historia sobrevive entre frames sin depender del pool transitorio.
     // -----------------------------------------------------------------------
     FRDGTextureRef FinalTexture = OutputTexture;
+
+    const bool  bTemporalEnabled = (CVarEPPEnableTemporal.GetValueOnRenderThread() != 0);
+    const float TemporalAlphaVal = FMath::Clamp(CVarEPPTemporalAlpha.GetValueOnRenderThread(), 0.0f, 1.0f);
+
+    if (bTemporalEnabled)
+    {
+        // Verificar compatibilidad del historial: tamano y formato deben coincidir con
+        // el frame actual. Si no coinciden (primer frame, cambio de resolucion o de
+        // formato por cambio en bHasOverride), se descarta el historial y se reinicia.
+        const bool bHistoryCompatible = bHistoryValid
+            && (HistorySize   == OutputExtent)
+            && (HistoryFormat == OutputPixelFormat);
+
+        if (!bHistoryCompatible)
+        {
+            HistoryRT[0].SafeRelease();
+            HistoryRT[1].SafeRelease();
+            bHistoryValid = false;
+        }
+
+        const int32 WriteIndex = 1 - HistoryReadIndex;
+
+        // Textura de salida del pase temporal: misma especificacion que OutputTexture
+        // para que AddCopyTexturePass a OverrideOutput (al final) sea valido (E_INVALIDARG).
+        const FRDGTextureDesc TemporalDesc = FRDGTextureDesc::Create2D(
+            OutputExtent, OutputPixelFormat, FClearValueBinding::Black,
+            TexCreate_UAV | TexCreate_ShaderResource | TexCreate_RenderTargetable);
+        FRDGTextureRef TemporalOutput = GraphBuilder.CreateTexture(
+            TemporalDesc, TEXT("EPP_TemporalOutput"));
+
+        if (bHistoryValid)
+        {
+            // Historia valida: ejecutar el pase EMA.
+            FRDGTextureRef HistoryReadRDG = GraphBuilder.RegisterExternalTexture(
+                HistoryRT[HistoryReadIndex], TEXT("EPP_HistoryRead"));
+
+            TShaderMapRef<FEdgePreservingPixelationTemporalCS> TemporalShader(
+                GetGlobalShaderMap(View.GetFeatureLevel()));
+
+            FEdgePreservingPixelationTemporalCS::FParameters* TemporalParams =
+                GraphBuilder.AllocParameters<FEdgePreservingPixelationTemporalCS::FParameters>();
+
+            TemporalParams->CurrentTexture    = GraphBuilder.CreateSRV(FRDGTextureSRVDesc(OutputTexture));
+            TemporalParams->HistoryTexture    = GraphBuilder.CreateSRV(FRDGTextureSRVDesc(HistoryReadRDG));
+            TemporalParams->LinearClampSampler =
+                TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+            TemporalParams->OutputTexture     = GraphBuilder.CreateUAV(TemporalOutput);
+
+            TemporalParams->ViewRect = FVector4f(
+                static_cast<float>(ViewRect.Min.X), static_cast<float>(ViewRect.Min.Y),
+                static_cast<float>(ViewRect.Width()), static_cast<float>(ViewRect.Height()));
+            // InverseViewSize normaliza sobre el render target completo (mismo convenio que el pase principal).
+            TemporalParams->InverseViewSize = FVector2f(
+                1.0f / FMath::Max(1, RTExtent.X),
+                1.0f / FMath::Max(1, RTExtent.Y));
+            TemporalParams->TemporalAlpha = TemporalAlphaVal;
+            TemporalParams->Padding_T0    = 0.0f;
+
+            FComputeShaderUtils::AddPass(
+                GraphBuilder,
+                RDG_EVENT_NAME("EdgePreservingPixelation_TemporalEMA (alpha=%.2f)", TemporalAlphaVal),
+                ERDGPassFlags::Compute,
+                TemporalShader,
+                TemporalParams,
+                FComputeShaderUtils::GetGroupCount(ViewportSize, FIntPoint(8, 8)));
+
+            FinalTexture = TemporalOutput;
+        }
+        else
+        {
+            // Primer frame o historial invalido: inicializar la historia con el frame actual
+            // sin aplicar mezcla EMA (para evitar que el primer frame aparezca atenuado
+            // o distorsionado por un historial no inicializado).
+            // El frame visible es OutputTexture sin cambios; TemporalOutput se usa solo
+            // como portador de la historia inicial (se copia OutputTexture en el).
+            AddCopyTexturePass(GraphBuilder, OutputTexture, TemporalOutput);
+            // FinalTexture permanece como OutputTexture (sin mezcla este frame).
+        }
+
+        // Persistir la salida del pase temporal (o la copia de inicializacion) como historia
+        // para el frame siguiente. QueueTextureExtraction ejecuta el pase de extraccion
+        // cuando el RDG se ejecuta al final del frame, antes de que el siguiente frame comience.
+        GraphBuilder.QueueTextureExtraction(TemporalOutput, &HistoryRT[WriteIndex]);
+
+        // Actualizar el estado de ping-pong DESPUES de llamar a QueueTextureExtraction:
+        // el proximo frame leera de WriteIndex (que ahora contiene la historia actual).
+        HistoryReadIndex = WriteIndex;
+        HistorySize      = OutputExtent;
+        HistoryFormat    = OutputPixelFormat;
+        bHistoryValid    = true;
+    }
+
+    // -----------------------------------------------------------------------
+    // Copia a OverrideOutput (cuando el engine pre-asigna el destino final).
+    //
+    // Se aplica sobre FinalTexture (OutputTexture sin temporal, o TemporalOutput
+    // si el pase EMA se ejecuto). Ambas tienen el mismo formato y extension que
+    // OverrideOutput porque OutputTexture se creo con OutputPixelFormat/OutputExtent
+    // y TemporalOutput hereda la misma especificacion, por lo que D3D12 CopyResource
+    // no produce E_INVALIDARG.
+    // -----------------------------------------------------------------------
     if (bHasOverride)
     {
-        FinalTexture = InOutInputs.OverrideOutput.Texture;
-        AddCopyTexturePass(GraphBuilder, OutputTexture, FinalTexture);
+        AddCopyTexturePass(GraphBuilder, FinalTexture, InOutInputs.OverrideOutput.Texture);
+        return FScreenPassTexture(InOutInputs.OverrideOutput.Texture, InputSceneColor.ViewRect);
     }
 
     return FScreenPassTexture(FinalTexture, InputSceneColor.ViewRect);
