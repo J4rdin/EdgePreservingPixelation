@@ -72,16 +72,16 @@ static TAutoConsoleVariable<float> CVarEPPNormalWeight(
 );
 
 // Compensacion de jitter TAA en la entrada al detector de bordes Sobel (Fase 4, Paso 4).
-// Cuando esta activo, SceneDepth y GBufferA se muestrean con offset bilineal derivado de
-// View.TemporalAAJitter, de modo que el Sobel lee la misma posicion geometrica cada frame
-// aunque el jitter sub-pixel cambie. Elimina el parpadeo de bordes en escena estatica.
-// Uso: EPP.JitterCompensation 0  (desactiva para ablacion A/B)
+// Default 0: el experimento empirico determino que no resuelve el parpadeo bajo TSR/TAA
+// en la configuracion final del TFG (FXAA, sin jitter activo). Se conserva expuesto como
+// parametro de ablacion para la comparativa A/B de la memoria academica.
+// Uso: EPP.JitterCompensation 1  (activa el offset round()+Load por View.TemporalAAJitter)
 static TAutoConsoleVariable<int32> CVarEPPJitterCompensation(
     TEXT("EPP.JitterCompensation"),
-    1,
+    0,
     TEXT("Compensa el jitter sub-pixel de TAA en el detector Sobel del pase de pixelacion. "
-         "1 = activo: muestreo bilineal con UV desplazada por View.TemporalAAJitter. "
-         "0 = desactivado (muestreo puntual sin compensacion — para ablacion A/B)."),
+         "1 = activo: muestreo con UV desplazada por View.TemporalAAJitter (round+Load). "
+         "0 = desactivado — default de la configuracion final TFG (FXAA sin jitter activo)."),
     ECVF_RenderThreadSafe
 );
 
