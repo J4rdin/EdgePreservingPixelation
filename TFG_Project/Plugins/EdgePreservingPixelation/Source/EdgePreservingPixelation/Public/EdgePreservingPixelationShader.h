@@ -120,11 +120,15 @@ public:
         SHADER_PARAMETER(float,     Padding0)
 
         // --- Constant buffer: Registro 2 (16 bytes) ---
-        // Desplazamiento X del jitter de Halton para estabilizacion temporal (reservado Fase 3).
-        SHADER_PARAMETER(float,     TemporalJitterX)
-        // Desplazamiento Y del jitter de Halton para estabilizacion temporal (reservado Fase 3).
+        // Activacion de la compensacion de jitter TAA en el detector Sobel.
+        //   1.0 = activo: los muestreos de SceneDepth y GBufferA se desplazan por
+        //         View.TemporalAAJitter para leer la misma posicion geometrica cada frame.
+        //   0.0 = desactivado: comportamiento sin compensacion (ablacion A/B).
+        // CVar: EPP.JitterCompensation.
+        SHADER_PARAMETER(float,     JitterCompensation)
+        // Reservado (antes TemporalJitterY). Sin semantica activa.
         SHADER_PARAMETER(float,     TemporalJitterY)
-        // Indice de frame para secuencias de acumulacion temporal (reservado Fase 4).
+        // Reservado (antes FrameIndex). Sin semantica activa.
         SHADER_PARAMETER(float,     FrameIndex)
         // Relleno explicito: completa el Registro 2 a 16 bytes. Sin semantica en HLSL.
         SHADER_PARAMETER(float,     Padding1)

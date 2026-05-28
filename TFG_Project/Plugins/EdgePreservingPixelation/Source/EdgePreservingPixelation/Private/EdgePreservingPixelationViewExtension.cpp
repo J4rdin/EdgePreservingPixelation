@@ -71,6 +71,20 @@ static TAutoConsoleVariable<float> CVarEPPNormalWeight(
     ECVF_RenderThreadSafe
 );
 
+// Compensacion de jitter TAA en la entrada al detector de bordes Sobel (Fase 4, Paso 4).
+// Cuando esta activo, SceneDepth y GBufferA se muestrean con offset bilineal derivado de
+// View.TemporalAAJitter, de modo que el Sobel lee la misma posicion geometrica cada frame
+// aunque el jitter sub-pixel cambie. Elimina el parpadeo de bordes en escena estatica.
+// Uso: EPP.JitterCompensation 0  (desactiva para ablacion A/B)
+static TAutoConsoleVariable<int32> CVarEPPJitterCompensation(
+    TEXT("EPP.JitterCompensation"),
+    1,
+    TEXT("Compensa el jitter sub-pixel de TAA en el detector Sobel del pase de pixelacion. "
+         "1 = activo: muestreo bilineal con UV desplazada por View.TemporalAAJitter. "
+         "0 = desactivado (muestreo puntual sin compensacion — para ablacion A/B)."),
+    ECVF_RenderThreadSafe
+);
+
 // Activacion del pase de estabilizacion temporal EMA (Fase 4).
 // 0 = desactivado (pixelacion pura, Fases 1-3b — util para comparar en ablacion).
 // 1 = activo (Paso 1: EMA ingenua sin reprojeccion).
@@ -252,11 +266,13 @@ FScreenPassTexture FEdgePreservingPixelationViewExtension::PostProcessPass_Rende
     Parameters->PixelSize = PixelSizeVal;
     Parameters->Padding0  = 0.0f;
 
-    // Constant buffer — Registro 2 (reservado para Fase 4)
-    Parameters->TemporalJitterX = 0.0f;
-    Parameters->TemporalJitterY = 0.0f;
-    Parameters->FrameIndex      = 0.0f;
-    Parameters->Padding1        = 0.0f;
+    // Constant buffer — Registro 2
+    // JitterCompensation: 1.0 activa el muestreo bilineal con offset View.TemporalAAJitter
+    // en el detector Sobel para eliminar el parpadeo de bordes inducido por el jitter TAA.
+    Parameters->JitterCompensation = (CVarEPPJitterCompensation.GetValueOnRenderThread() != 0) ? 1.0f : 0.0f;
+    Parameters->TemporalJitterY    = 0.0f;  // reservado
+    Parameters->FrameIndex         = 0.0f;  // reservado
+    Parameters->Padding1           = 0.0f;
 
     // Constant buffer — Registro 3 (Fase 3: deteccion de bordes Sobel combinado)
     // EdgeThreshold se aplica sobre la puntuacion combinada:

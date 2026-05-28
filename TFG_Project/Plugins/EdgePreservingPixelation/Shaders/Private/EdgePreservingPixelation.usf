@@ -21,11 +21,30 @@
 //
 //         Modo debug (EPP.DebugMode 1): bordes en blanco sobre negro, sin mezcla.
 //
+// Fase 4 — Compensacion de jitter TAA en el detector Sobel (EPP.JitterCompensation):
+//   El jitter sub-pixel que aplica TAA desplaza cada frame la geometria renderizada
+//   entre fracciones de pixel. Sin compensacion, el Sobel lee posiciones ligeramente
+//   distintas cada frame, causando que bordes cercanos al umbral cambien su decision
+//   borde/no-borde de forma binaria → parpadeo visual.
+//
+//   Solucion: calcular JitterUVDelta (offset en UV derivado de View.TemporalAAJitter.xy),
+//   convertirlo a espacio de pixel (JitterPx) y desplazar cada muestreo con round():
+//     texel = round(ScreenCoord + JitterPx)
+//   round() elige el texel entero mas cercano a la posicion neutral-geometrica del centroide
+//   en este frame. No se usa SampleLevel (bilineal) porque la profundidad es una funcion
+//   escalon en bordes: interpolar entre primer plano y fondo crea valores artificiales que
+//   varian sub-pixel con el jitter, amplificando el parpadeo en lugar de eliminarlo.
+//   Con round() el texel elegido solo cambia cuando el jitter supera medio pixel, lo que
+//   ocurre raramente; el Sobel ve la misma lectura en frames consecutivos → sin parpadeo.
+//
+//   Derivacion de JitterUVDelta (vease comentario en MainCS).
+//
 // Compatible con UE5 5.5, Shader Model 5+ (D3D12 / Vulkan).
 // Punto de entrada del Compute Shader: MainCS.
 
 // Platform.ush:         macros y tipos de compatibilidad entre backends (D3D12, Vulkan, Metal).
-// Common.ush:           declara cbuffer View{} (InvDeviceZToWorldZTransform, etc.) y ConvertFromDeviceZ().
+// Common.ush:           declara cbuffer View{} (InvDeviceZToWorldZTransform, TemporalAAJitter, etc.)
+//                       y ConvertFromDeviceZ().
 // SceneTexturesCommon.ush: declara el uniform buffer SceneTexturesStruct (FSceneTextureUniformParameters)
 //                       y los helpers CalcSceneDepth(uint2), CalcSceneDepth(float2), etc.
 //                       Incluye Common.ush internamente; todos usan #pragma once, sin duplicaciones.
@@ -35,7 +54,6 @@
 
 // =============================================================================
 // Recursos de entrada — Shader Resource Views (SRV)
-// Vinculados por nombre desde FEdgePreservingPixelationCS::FParameters via RDG.
 // =============================================================================
 
 // Color de escena LDR post-tonemap. Formato tipico: B8G8R8A8 o R10G10B10A2.
@@ -44,165 +62,149 @@ Texture2D          SceneColor;
 // Buffer de velocidad por pixel en NDC/frame. Reservado para Fase 4 (estabilizacion temporal).
 Texture2D<float2>  SceneVelocity;
 
-// SceneDepth se accede a traves del uniform buffer SceneTexturesStruct (declarado por
-// SceneTexturesCommon.ush, enlazado desde SHADER_PARAMETER_RDG_UNIFORM_BUFFER).
-// Uso: SceneTexturesStruct.SceneDepthTexture.Load(int3(coord, 0)).r
-
-// Sampler bilineal con clamp. Usado exclusivamente para muestrear SceneColor.
-// SceneDepth se accede con Load() (muestra puntual exacta, sin interpolacion).
+// Sampler bilineal con clamp. Usado para muestrear SceneColor (SampleLevel en cuantizacion UV)
+// y tambien para el muestreo con compensacion de jitter de SceneDepth y GBufferA.
 SamplerState       LinearClampSampler;
 
 // =============================================================================
 // Recurso de salida — Unordered Access View (UAV)
 // =============================================================================
 
-// Textura de salida con acceso de escritura aleatoria.
 RWTexture2D<float4> OutputTexture;
 
 // =============================================================================
-// Constant buffer $Globals — generado por UE5 a partir de los campos
-// SHADER_PARAMETER() de FEdgePreservingPixelationCS::FParameters.
+// Constant buffer $Globals
 //
-// El layout HLSL de variables globales debe coincidir byte a byte con el orden
-// de declaracion en FParameters (el engine no reordena; el programador garantiza
-// la alineacion con padding explicito).
+// Layout exacto (sincronizado con FEdgePreservingPixelationCS::FParameters):
 //
 // Registro 0 [bytes  0-15]: ViewRect
 // Registro 1 [bytes 16-31]: InverseViewSize | PixelSize | Padding0
-// Registro 2 [bytes 32-47]: TemporalJitterX | TemporalJitterY | FrameIndex | Padding1
+// Registro 2 [bytes 32-47]: JitterCompensation | TemporalJitterY | FrameIndex | Padding1
 // Registro 3 [bytes 48-63]: EdgeThreshold | DebugMode | DepthWeight | NormalWeight
 //
 // Nota: cbuffer View{} (declarado en Common.ush) es un uniform buffer independiente
 //       enlazado por RDG desde Parameters->View = View.ViewUniformBuffer.
-//       No ocupa ninguno de los registros de $Globals listados arriba.
+//       No ocupa registros de $Globals.
 // =============================================================================
 
-// Region activa del viewport en pixeles del render target: [OffsetX, OffsetY, Width, Height].
 float4  ViewRect;
 
-// Inversa del tamano del render target: (1/RTWidth, 1/RTHeight).
-// Convierte coordenadas de pixel a UV normalizadas [0,1] sobre el render target completo.
 float2  InverseViewSize;
-// Tamano del bloque de pixelacion en pixeles (ej: 8.0 → bloques 8×8).
 float   PixelSize;
-// Relleno explicito: completa el Registro 1 a 16 bytes. Sin semantica.
 float   Padding0;
 
-// Reservados para Fase 4 (estabilizacion temporal con SceneVelocity).
-float   TemporalJitterX;
-float   TemporalJitterY;
-float   FrameIndex;
-// Relleno explicito: completa el Registro 2 a 16 bytes. Sin semantica.
+// Factor de activacion de la compensacion de jitter TAA (0.0 = desactivado, 1.0 = activo).
+// Cuando es 1.0, los muestreos de SceneDepth y GBufferA usan UV desplazada por JitterUVDelta.
+// CVar: EPP.JitterCompensation.
+float   JitterCompensation;
+float   TemporalJitterY;   // reservado
+float   FrameIndex;        // reservado
 float   Padding1;
 
-// Umbral aplicado sobre la puntuacion combinada de borde:
-//   CombinedScore = DepthWeight * GradDepthRelativo + NormalWeight * GradNormal
-// Rango util: [0.02, 0.5]. CVar: EPP.EdgeThreshold.
 float   EdgeThreshold;
-// Selector de modo de salida:
-//   0.0 → pixelacion normal.
-//   1.0 → debug: bordes en blanco sobre negro.
-// CVar: EPP.DebugMode.
 float   DebugMode;
-// Peso del gradiente Sobel de profundidad relativa en la puntuacion combinada.
-// Escala la desviacion de planaridad relativa (segundo orden, adimensional).
-// CVar: EPP.DepthWeight. Defecto: 1.0.
 float   DepthWeight;
-// Peso del gradiente Sobel de normal del GBuffer en la puntuacion combinada.
-// Escala el gradiente en espacio de normal codificada (rango [0,1] por canal).
-// CVar: EPP.NormalWeight. Defecto: 1.0.
 float   NormalWeight;
 
 // =============================================================================
-// Utilidades de profundidad
+// Utilidades de profundidad y normal — muestreo puntual con compensacion de jitter
+//
+// Ambas funciones reciben JitterPx (offset en espacio de pixel, precomputado
+// en MainCS) y usan Load() sobre el texel entero mas cercano al centroide
+// compensado.
+//
+// Por que Load puntual y NO SampleLevel bilineal:
+//   La profundidad es una funcion escalon en bordes geometricos: interpolar
+//   bilinealmente entre el texel de primer plano y el de fondo produce un
+//   valor artificial (media ponderada de dos superficies distintas) que:
+//     a) Varia con la fraccion sub-pixel de la UV compensada, que cambia
+//        cada frame al cambiar el jitter → introduce variacion adicional.
+//     b) No tiene significado geometrico (no hay superficie a esa profundidad
+//        intermedia); el operador Sobel ve un gradiente suavizado en lugar del
+//        escalon real, lo que puede hacer que CombinedScore cruce EdgeThreshold
+//        de forma distinta cada frame.
+//   Las normales del GBuffer no son un espacio lineal: la media bilineal de
+//   dos normales codificadas no produce una normal valida sin renormalizar.
+//   En cambio, round() elige el texel entero que mejor representa la posicion
+//   de la geometria neutral del centroide en este frame. El resultado es
+//   deterministico dado un valor fijo de JitterPx.
 // =============================================================================
 
 // ----------------------------------------------------------------------------
 // SampleLinearDepth
 //
-// Lee el device Z del texel indicado y lo convierte a profundidad lineal en
-// unidades de mundo (centimetros en UE5) usando ConvertFromDeviceZ() de Common.ush.
+// Lee SceneDepth en el texel entero mas cercano a (ScreenCoord + JitterPx) y
+// convierte el device-Z a profundidad lineal (cm en UE5) via ConvertFromDeviceZ().
 //
-// Por que la formula generica es incorrecta en UE5:
+// Por que ConvertFromDeviceZ():
+//   UE5 usa reversed-Z y far infinito. ConvertFromDeviceZ() usa
+//   View.InvDeviceZToWorldZTransform (precalculado) y es el unico metodo
+//   robusto y portable para linealizar profundidad.
 //
-//   Formula directa (direct-Z, OpenGL):  linearZ = near * far / (far - DeviceZ*(far - near))
-//   Esta formula FALLA en UE5 por dos razones independientes:
+// Cuando JitterPx == (0,0) (compensacion desactivada o jitter nulo),
+// round(ScreenCoord + (0,0)) == ScreenCoord → identico a un Load sin compensacion.
 //
-//   1) Reversed-Z: UE5 invierte el rango de profundidad respecto al estandar OpenGL.
-//      near → DeviceZ=1, far → DeviceZ=0. La formula directa calcula el reciproco
-//      incorrecto con esta convencion.
-//
-//   2) Far infinito: la proyeccion perspectiva de UE5 5.x usa far → ∞. Sustituir ∞
-//      en la formula produce una expresion indeterminada; ademas 'far' no es accesible
-//      como un float finito util desde el shader.
-//
-//   ConvertFromDeviceZ() usa View.InvDeviceZToWorldZTransform (float4), precalculado
-//   por el engine a partir de la matriz de proyeccion actual. Codifica correctamente
-//   reversed-Z, far infinito, perspectiva y ortografica sin exponer near/far al shader.
-//   Es la unica forma robusta y portable de linealizar profundidad en UE5.
-//
-// Parametro: ScreenCoord — coordenada entera en espacio del render target [px].
-// Devuelve:  profundidad lineal positiva en unidades de mundo (crece con la distancia).
+// Parametros:
+//   ScreenCoord — coordenada entera base (centroide del bloque o vecino Sobel).
+//   JitterPx    — offset en pixeles de compensacion TAA (float2, puede ser fraccionario).
+// Devuelve: profundidad lineal positiva en unidades de mundo.
 // ----------------------------------------------------------------------------
-float SampleLinearDepth(int2 ScreenCoord)
+float SampleLinearDepth(int2 ScreenCoord, float2 JitterPx)
 {
-    // SceneTexturesStruct.SceneDepthTexture es el depth-stencil buffer real de escena,
-    // enlazado por el UB FSceneTextureUniformParameters (creado con ESceneTextureSetupMode::SceneDepth).
-    // Load() accede exactamente al texel indicado, sin interpolacion bilineal.
-    // Interpolar profundidad en bordes geometricos generaria valores promediados
-    // sin correspondencia geometrica, contaminando la deteccion de discontinuidades.
-    float DeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(ScreenCoord, 0)).r;
+    // round() snappea al texel mas cercano tras el offset sub-pixel.
+    // clamp al viewport: el offset puede llevar el texel 1 pixel fuera del area activa.
+    int2 TexelCoord = clamp(
+        int2(round(float2(ScreenCoord) + JitterPx)),
+        int2(ViewRect.xy),
+        int2(ViewRect.x + ViewRect.z - 1, ViewRect.y + ViewRect.w - 1)
+    );
+    float DeviceZ = SceneTexturesStruct.SceneDepthTexture.Load(int3(TexelCoord, 0)).r;
     return ConvertFromDeviceZ(DeviceZ);
+}
+
+// ----------------------------------------------------------------------------
+// SampleGBufferNormal
+//
+// Lee GBufferA (normal codificada en [0,1]) en el texel entero mas cercano
+// a (ScreenCoord + JitterPx). Muestreo puntual por las mismas razones que
+// SampleLinearDepth.
+//
+// Parametros y convencion: identicos a SampleLinearDepth.
+// Devuelve: normal codificada como float3 en rango [0,1] por canal.
+// ----------------------------------------------------------------------------
+float3 SampleGBufferNormal(int2 ScreenCoord, float2 JitterPx)
+{
+    int2 TexelCoord = clamp(
+        int2(round(float2(ScreenCoord) + JitterPx)),
+        int2(ViewRect.xy),
+        int2(ViewRect.x + ViewRect.z - 1, ViewRect.y + ViewRect.w - 1)
+    );
+    return SceneTexturesStruct.GBufferATexture.Load(int3(TexelCoord, 0)).rgb;
 }
 
 // ----------------------------------------------------------------------------
 // ComputeDepthEdgeScore
 //
-// Detecta discontinuidades reales de profundidad distinguiendolas de pendientes
-// suaves y de la curvatura interior de objetos.
+// Detecta discontinuidades reales de profundidad con el test min(Dev2, Jump)
+// sobre los 4 ejes del kernel 3x3. Ver comentario completo en la version
+// anterior del shader.
 //
-// Test min(Dev2, Jump) por eje — por que funciona:
-//
-//   Para un par de vecinos opuestos (A, Centro=C, B):
-//     Dev2  = |2C - A - B|    diferencia de segundo orden
-//     Jump  = |A - B|         diferencia de primer orden (magnitud del salto)
-//     Score = min(Dev2, Jump)
-//
-//   Caso ramp/pendiente plana (suelo oblicuo): A=C-k, B=C+k (progresion lineal)
-//     Dev2 = 0  (la rampa es predecible por interpolacion lineal)
-//     min(0, 2k) = 0.  ← Suprime el falso positivo del suelo. ✓
-//
-//   Caso curvatura simetrica (interior de esfera o cilindro):
-//     A = C-k, B = C-k (ambos vecinos a igual distancia del centro, simetria par)
-//     Jump = |A-B| = 0  (vecinos simetricos, sin salto entre ellos)
-//     min(2k, 0) = 0.  ← Suprime el interior de objetos curvos. ✓
-//
-//   Caso escalon geometrico real (oclusion, silueta):
-//     Un vecino es la superficie proxima, el otro el fondo lejano.
-//     El par es fuertemente asimetrico: Dev2 grande Y Jump grande.
-//     min(grande, grande) = grande.  ← Detecta el borde. ✓
-//
-// Se evaluan 4 ejes (H, V, diagonal NW-SE, diagonal NE-SW); se toma el maximo
-// para responder al eje con el escalon mas pronunciado sin acumular ruido.
-//
-// Normalizacion por la profundidad minima del vecindario 3×3 (no la del pixel
-// central): la metrica es invariante a distancia de camara y no se diluye cuando
-// el pixel central cae en el lado lejano del borde.
+// Cambio en Fase 4: recibe JitterUVDelta y lo pasa a SampleLinearDepth,
+// que usa round(ScreenCoord + JitterPx) + Load() para leer el texel entero
+// mas cercano a la posicion neutral-geometrica del centroide compensado.
 //
 // Parametros:
-//   PixelCoord — coordenada entera absoluta en el render target [px].
-//   OutMinDepth — profundidad lineal minima del vecindario 3×3 [cm].
+//   PixelCoord    — centroide del bloque en el render target.
+//   JitterUVDelta — offset UV de compensacion TAA.
+//   OutMinDepth   — profundidad minima del vecindario 3x3 (salida).
 // Devuelve: puntuacion de borde de profundidad, adimensional.
 // ----------------------------------------------------------------------------
-float ComputeDepthEdgeScore(int2 PixelCoord, out float OutMinDepth)
+float ComputeDepthEdgeScore(int2 PixelCoord, float2 JitterUVDelta, out float OutMinDepth)
 {
-    // Limites inclusivos del viewport en coordenadas enteras de render target.
     int2 VPMin = int2(ViewRect.xy);
     int2 VPMax = int2(ViewRect.x + ViewRect.z - 1,
                       ViewRect.y + ViewRect.w - 1);
 
-    // Muestreo de la cuadricula 3×3 centrada en PixelCoord.
-    // p[row][col], con row/col ∈ {0,1,2} correspondiente a offset (dy,dx) ∈ {-1,0,+1}.
     float p[3][3];
     float MinDepth = 1.0e38f;
     [unroll]
@@ -211,8 +213,10 @@ float ComputeDepthEdgeScore(int2 PixelCoord, out float OutMinDepth)
         [unroll]
         for (int dx = -1; dx <= 1; dx++)
         {
+            // Clamp entero al viewport; el offset de jitter se aplica dentro
+            // de SampleLinearDepth (en UV, con clamp del sampler si sobrepasa el RT).
             int2 SampleCoord = clamp(PixelCoord + int2(dx, dy), VPMin, VPMax);
-            float D = SampleLinearDepth(SampleCoord);
+            float D = SampleLinearDepth(SampleCoord, JitterUVDelta);
             p[dy + 1][dx + 1] = D;
             MinDepth = min(MinDepth, D);
         }
@@ -221,84 +225,36 @@ float ComputeDepthEdgeScore(int2 PixelCoord, out float OutMinDepth)
 
     float C = p[1][1];
 
-    // min(Dev2, Jump) por eje:
-    //   Dev2  = |2C - A - B|   suprime rampas lineales (Dev2 = 0 para rampas)
-    //   Jump  = |A - B|        suprime curvatura simetrica (Jump = 0 si A == B)
-    //   Score = min: alto solo si el par es asimetrico en AMBAS medidas → escalon real
+    // min(Dev2, Jump) por eje: alto solo para escalones asimetricos reales.
     float ScoreH  = min(abs(2.0f*C - p[1][0] - p[1][2]),  abs(p[1][0] - p[1][2]));
     float ScoreV  = min(abs(2.0f*C - p[0][1] - p[2][1]),  abs(p[0][1] - p[2][1]));
     float ScoreD1 = min(abs(2.0f*C - p[0][0] - p[2][2]),  abs(p[0][0] - p[2][2]));
     float ScoreD2 = min(abs(2.0f*C - p[0][2] - p[2][0]),  abs(p[0][2] - p[2][0]));
 
     float Score = max(max(ScoreH, ScoreV), max(ScoreD1, ScoreD2));
-
-    // Normalizacion por profundidad minima del vecindario.
-    // max(..., 1.0) previene division por zero si toda la escena esta a < 1 cm.
     return Score / max(MinDepth, 1.0f);
-}
-
-// ----------------------------------------------------------------------------
-// SampleGBufferNormal
-//
-// Lee el texel de GBufferA en la coordenada indicada y devuelve los tres canales
-// RGB como un float3. GBufferA almacena la normal de superficie codificada en
-// espacio de mundo, empaquetada como (N * 0.5 + 0.5) → rango [0,1] por canal.
-//
-// No se decodifica a normal unitaria [-1,1]: para deteccion de discontinuidades
-// basta con detectar cambios en el valor codificado; una normal constante produce
-// gradiente ~0 independientemente de la codificacion, y un cambio de orientacion
-// produce gradiente no nulo en los mismos texeles en ambas representaciones.
-//
-// Load() accede al texel exacto sin interpolacion bilineal, igual que en SampleLinearDepth.
-//
-// Parametro: ScreenCoord — coordenada entera en espacio del render target [px].
-// Devuelve:  normal codificada como float3 en rango [0,1] por canal.
-// ----------------------------------------------------------------------------
-float3 SampleGBufferNormal(int2 ScreenCoord)
-{
-    return SceneTexturesStruct.GBufferATexture.Load(int3(ScreenCoord, 0)).rgb;
 }
 
 // ----------------------------------------------------------------------------
 // ComputeNormalEdgeScore
 //
 // Detecta discontinuidades reales de la normal del GBuffer (GBufferA.rgb)
-// distinguiendolas de la curvatura suave de superficies curvas.
+// con el test min(Dev2, Jump) vectorial sobre 4 ejes. Ver comentario completo
+// en la version anterior del shader.
 //
-// Aplica el mismo test min(Dev2, Jump) que ComputeDepthEdgeScore, pero
-// operando sobre vectores float3 (un valor por canal RGB de la normal codificada):
+// Cambio en Fase 4: recibe JitterUVDelta y lo pasa a SampleGBufferNormal.
 //
-//   Para un par opuesto (A, C, B), por canal:
-//     Dev2  = |2C - A - B|   (3-vector)   cero en variacion lineal de la normal
-//     Jump  = |A - B|         (3-vector)   cero si ambos vecinos tienen la misma normal
-//     Score_canal = min(Dev2_canal, Jump_canal)
-//
-//   La normal de una superficie CURVA varia aproximadamente como una funcion
-//   circular, cuya segunda diferencia discreta es O(curvatura²·h²) mientras
-//   que la primera diferencia es O(curvatura·h). El min de ambas es O(curvatura²·h²),
-//   de magnitud muy inferior a la de una arista real (O(1)).
-//   Esto suprime la curvatura suave de esferas, cilindros y meshes redondeados.
-//
-//   Una ARISTA REAL (cruce entre dos normales muy diferentes) produce un par
-//   fuertemente asimetrico: Dev2 grande Y Jump grande → min grande. ✓
-//
-//   Una superficie PLANA tiene normal constante → todos los terminos son 0. ✓
-//
-// Se evaluan 4 ejes (H, V, D1, D2). Para cada eje, el score escalar es la
-// media de los scores por canal: dot(min(Dev2, Jump), (1/3, 1/3, 1/3)).
-// El resultado final es el maximo de los cuatro ejes.
-//
-// Parametro: PixelCoord — coordenada entera absoluta en el render target [px].
-// Devuelve:  puntuacion de borde de normal, adimensional.
+// Parametros:
+//   PixelCoord    — centroide del bloque en el render target.
+//   JitterUVDelta — offset UV de compensacion TAA.
+// Devuelve: puntuacion de borde de normal, adimensional.
 // ----------------------------------------------------------------------------
-float ComputeNormalEdgeScore(int2 PixelCoord)
+float ComputeNormalEdgeScore(int2 PixelCoord, float2 JitterUVDelta)
 {
-    // Limites del viewport, igual que en ComputeDepthEdgeScore.
     int2 VPMin = int2(ViewRect.xy);
     int2 VPMax = int2(ViewRect.x + ViewRect.z - 1,
                       ViewRect.y + ViewRect.w - 1);
 
-    // Muestreo de la cuadricula 3×3 por canal RGB.
     float3 p[3][3];
     [unroll]
     for (int dy = -1; dy <= 1; dy++)
@@ -307,16 +263,13 @@ float ComputeNormalEdgeScore(int2 PixelCoord)
         for (int dx = -1; dx <= 1; dx++)
         {
             int2 SampleCoord = clamp(PixelCoord + int2(dx, dy), VPMin, VPMax);
-            p[dy + 1][dx + 1] = SampleGBufferNormal(SampleCoord);
+            p[dy + 1][dx + 1] = SampleGBufferNormal(SampleCoord, JitterUVDelta);
         }
     }
 
     float3 C = p[1][1];
-    // Factor de reduccion de 3 canales a escalar: media aritmetica de canales.
     const float3 OneThird = float3(1.0f / 3.0f, 1.0f / 3.0f, 1.0f / 3.0f);
 
-    // min(Dev2, Jump) vectorial por eje → media de canales para obtener escalar.
-    // abs() y min() operan componente a componente sobre float3 en HLSL.
     float ScoreH  = dot(min(abs(2.0f*C - p[1][0] - p[1][2]),  abs(p[1][0] - p[1][2])),  OneThird);
     float ScoreV  = dot(min(abs(2.0f*C - p[0][1] - p[2][1]),  abs(p[0][1] - p[2][1])),  OneThird);
     float ScoreD1 = dot(min(abs(2.0f*C - p[0][0] - p[2][2]),  abs(p[0][0] - p[2][2])),  OneThird);
@@ -327,19 +280,13 @@ float ComputeNormalEdgeScore(int2 PixelCoord)
 
 // =============================================================================
 // Punto de entrada del Compute Shader
-// Grupo de hilos: 8×8 = 64 hilos (optimo para warp/wavefront de 32-64 hilos).
-// Los defines THREADGROUP_SIZE_X/Y se inyectan desde ModifyCompilationEnvironment.
 // =============================================================================
 
 [numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, 1)]
 void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 {
-    // Coordenada absoluta en el render target: id local del hilo + offset del viewport.
     uint2 PixelCoord = DispatchThreadId.xy + uint2(ViewRect.xy);
 
-    // Descarte temprano de hilos fuera del viewport activo.
-    // El numero de grupos de despacho se redondea hacia arriba al multiplo de
-    // THREADGROUP_SIZE; los hilos excedentes deben descartarse explicitamente.
     if (PixelCoord.x >= uint(ViewRect.x + ViewRect.z) ||
         PixelCoord.y >= uint(ViewRect.y + ViewRect.w))
     {
@@ -348,16 +295,6 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 
     // =========================================================================
     // PASO 1 — Cuantizacion UV (pixelacion por bloques regulares)
-    //
-    // Todos los pixeles que pertenecen al mismo bloque de PixelSize×PixelSize
-    // muestrean SceneColor en el centroide geometrico de ese bloque, produciendo
-    // regiones de color uniforme (estetica de pixelacion retro).
-    //
-    // Calculo en espacio LOCAL al viewport (coordenadas [0, ViewportDim-1]):
-    //   BlockIndex         = floor(LocalPixel / PixelSize)
-    //   BlockCentroidLocal = (BlockIndex + 0.5) * PixelSize   (+0.5: centro geometrico)
-    //   CentroidScreen     = BlockCentroidLocal + ViewRect.xy  (espacio render target)
-    //   QuantizedUV        = (CentroidScreen + 0.5) * InverseViewSize  (UV normalizada)
     // =========================================================================
     float2 LocalPixel         = float2(DispatchThreadId.xy);
     float2 BlockIndex         = floor(LocalPixel / PixelSize);
@@ -365,63 +302,69 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     float2 CentroidScreen     = BlockCentroidLocal + float2(ViewRect.xy);
     float2 QuantizedUV        = (CentroidScreen + 0.5f) * InverseViewSize;
 
-    // SampleLevel con LOD 0 explicito: ddx/ddy no estan disponibles en compute shaders.
-    // CentroidColor es el color base de pixelacion; se usa directamente en interiores
-    // y como punto de partida del lerp en bloques de borde (PASO 3b).
     float4 CentroidColor = SceneColor.SampleLevel(LinearClampSampler, QuantizedUV, 0.0f);
 
     // =========================================================================
-    // PASO 2 — Deteccion de bordes geometricos a nivel de BLOQUE
+    // PASO 2 — Compensacion de jitter TAA para el detector de bordes
     //
-    // INVARIANTE DE REJILLA: toda la evaluacion de borde — muestreo de profundidad,
-    // muestreo de normal, los kernels de planaridad/normal, CombinedScore y BlendFactor —
-    // se realiza UNA SOLA VEZ por bloque, en el texel del CENTROIDE del bloque.
+    // View.TemporalAAJitter.xy es el offset que el motor aplica al frustum de
+    // proyeccion en espacio NDC [-1,1]:
+    //   jittered_NDC = neutral_NDC + TemporalAAJitter.xy
     //
-    // Por que: distintos pixeles dentro del mismo bloque deben producir el mismo
-    // color final. Si el score se evaluase en la UV propia de cada pixel, distintos
-    // pixeles del bloque obtendrian distintos BlendFactor → colores distintos dentro
-    // del bloque → el bloque se fragmenta y filtra detalle sub-bloque. Eso rompe
-    // la estetica pixel-art (rejilla uniforme de bloques monocromaticos).
+    // Consecuencia: la geometria en posicion neutral P aparece en la pantalla
+    // desplazada por jitter_px pixeles. Al leer SceneDepth con Load() en el
+    // centroide entero BlockCentroidCoord, cada frame se lee la geometria en
+    // una posicion neutral diferente (BlockCentroidCoord - jitter_px), lo que
+    // hace que el Sobel produzca puntuaciones distintas frame a frame cerca de
+    // bordes geometricos → parpadeo binario borde/no-borde.
     //
-    // Todos los pixeles del mismo bloque comparten la misma CentroidScreen, por lo
-    // que todos evaluaran exactamente el mismo score y obtendran el mismo color final.
+    // Solucion: calcular JitterUVDelta a partir de View.TemporalAAJitter.xy y pasarlo
+    // a SampleLinearDepth / SampleGBufferNormal, donde round(ScreenCoord + JitterPx)
+    // elige el texel entero mas cercano a la posicion neutral-geometrica del centroide.
+    // Esto estabiliza la lectura: el texel elegido solo cambia si el jitter supera medio
+    // pixel, lo que ocurre raramente. No se usa SampleLevel (bilineal) porque interpolar
+    // profundidad en bordes escalon produce valores geometricamente invalidos.
     //
-    // Senal 1 — min(Dev2, Jump) sobre profundidad lineal (SceneDepth):
-    //   Cero en rampas lineales y curvatura simetrica; alto en escalones reales.
-    //   Normalizado por la profundidad minima del vecindario 3×3 del centroide.
+    // Derivacion de JitterUVDelta (en UV sobre el render target completo):
+    //   jitter_px.x =  TemporalAAJitter.x * ViewRect.z / 2   (NDC → pixeles, eje X)
+    //   jitter_px.y = -TemporalAAJitter.y * ViewRect.w / 2   (NDC → pixeles, eje Y
+    //                                                          con signo invertido:
+    //                                                          NDC.y positivo = arriba =
+    //                                                          pixel Y menor)
+    //   JitterUVDelta.x =  jitter_px.x * InverseViewSize.x
+    //                   =  TemporalAAJitter.x * ViewRect.z * InverseViewSize.x * 0.5
+    //   JitterUVDelta.y =  TemporalAAJitter.y * (-ViewRect.w * InverseViewSize.y * 0.5)
     //
-    // Senal 2 — min(Dev2, Jump) vectorial sobre normal del GBuffer (GBufferA.rgb):
-    //   Cero en superficies planas y curvatura suave; alto en aristas bruscas.
+    // Caso viewport == RT (tipico): ViewRect.z * InverseViewSize.x = 1, por lo que
+    //   JitterUVDelta ≈ TemporalAAJitter.xy * float2(0.5, -0.5)
+    // (coincide con la formula NDC→UV estandar de UE5).
     //
-    // Fusion: CombinedScore = DepthWeight * Score1 + NormalWeight * Score2.
-    //   bIsEdge (umbral binario) solo se usa en modo debug.
+    // Cuando JitterCompensation == 0: JitterUVDelta = (0,0) → round(ScreenCoord + 0)
+    // == ScreenCoord → Load identico al de Fases anteriores. Sin cambio de comportamiento.
+    // Util para ablacion A/B con EPP.JitterCompensation.
     // =========================================================================
+    float2 JitterUVDelta = View.TemporalAAJitter.xy
+                           * float2( ViewRect.z * InverseViewSize.x,
+                                    -ViewRect.w * InverseViewSize.y)
+                           * (0.5f * JitterCompensation);
 
-    // Coordenada entera del centroide del bloque en el render target.
-    // Es la misma referencia espacial que QuantizedUV, pero en pixeles enteros.
-    // Todos los pixeles del bloque comparten este valor → score uniforme por bloque.
+    // =========================================================================
+    // PASO 2 (cont.) — Deteccion de bordes geometricos a nivel de BLOQUE
+    //
+    // INVARIANTE DE REJILLA: toda la evaluacion de borde se realiza UNA SOLA VEZ
+    // por bloque, en el texel del CENTROIDE. Ver comentario en versiones anteriores.
+    // =========================================================================
     int2 BlockCentroidCoord = int2(CentroidScreen);
 
-    // --- Senal 1: puntuacion de borde de profundidad (evaluada en el centroide) ---
     float MinNeighborDepth;
-    float RelativeDepthDev = ComputeDepthEdgeScore(BlockCentroidCoord, MinNeighborDepth);
+    float RelativeDepthDev = ComputeDepthEdgeScore(BlockCentroidCoord, JitterUVDelta, MinNeighborDepth);
+    float NormalGrad       = ComputeNormalEdgeScore(BlockCentroidCoord, JitterUVDelta);
 
-    // --- Senal 2: puntuacion de borde de normal (evaluada en el centroide) ---
-    float NormalGrad = ComputeNormalEdgeScore(BlockCentroidCoord);
-
-    // --- Puntuacion combinada y clasificacion binaria ---
-    // La suma ponderada integra ambas senales sin exigir que las dos sean fuertes.
     float CombinedScore = DepthWeight * RelativeDepthDev + NormalWeight * NormalGrad;
     bool bIsEdge = (CombinedScore > EdgeThreshold);
 
     // =========================================================================
     // MODO DEBUG — Visualizacion de bordes detectados (blanco sobre negro)
-    //
-    // Muestra la clasificacion binaria bIsEdge: blanco = borde, negro = interior.
-    // Permite ajustar EPP.EdgeThreshold, EPP.DepthWeight y EPP.NormalWeight en
-    // tiempo real e inspeccionar el resultado del detector de bordes de forma aislada.
-    // Ignora completamente la pixelacion y la mezcla adaptativa del PASO 3b.
-    // Activo via consola: EPP.DebugMode 1
     // =========================================================================
     if (DebugMode >= 0.5f)
     {
@@ -433,53 +376,19 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     // =========================================================================
     // PASO 3b — Mezcla adaptativa consciente de profundidad
     //
-    // La rejilla permanece UNIFORME: todos los bloques tienen el mismo tamanno
-    // PixelSize. Lo que cambia en los bloques de borde es el PUNTO DE MUESTREO
-    // dentro del bloque:
-    //
-    //   Bloque interior (CombinedScore bajo):
-    //     Muestrea el centroide geometrico del bloque → CentroidColor.
-    //     Comportamiento identico al de Fase 2.
-    //
-    //   Bloque de borde (CombinedScore alto):
-    //     Barre todos los texeles del bloque, identifica el de menor profundidad
-    //     lineal (la superficie en primer plano) y muestrea SceneColor en ese
-    //     punto. El bloque "se compromete" con el objeto mas cercano, en lugar
-    //     de promediar primer plano y fondo como haria el centroide.
-    //
-    // Transicion continua mediante lerp:
-    //   BlendFactor = saturate(CombinedScore / max(EdgeThreshold, 1e-4))
-    //   FinalColor  = lerp(CentroidColor, NearestColor, BlendFactor)
-    //
-    // BlendFactor = 0 en interiores puros (CombinedScore = 0).
-    // BlendFactor = 1 en bordes fuertes (CombinedScore >= EdgeThreshold).
-    // La rampa lineal entre ambos extremos evita el popping abrupto cuando un
-    // bloque cruza el umbral entre frames.
-    //
-    // Como CombinedScore se evalua en el centroide del bloque (PASO 2), BlendFactor
-    // es CONSTANTE dentro del bloque. Todos sus pixeles ejecutan el mismo lerp con
-    // los mismos terminos → producen el mismo color final → la rejilla es uniforme.
-    //
-    // Optimizacion [branch]: el barrido del bloque (O(PixelSize²) lecturas de
-    // profundidad) se omite cuando BlendFactor < 0.01, es decir, para todos
-    // los pixels de interior donde la contribucion de NearestColor es < 1%.
-    // La coherencia espacial de los bloques hace que la rama sea mayormente
-    // uniforme a nivel de warp, minimizando la divergencia.
+    // El barrido de profundidad del bloque (para encontrar el texel mas cercano)
+    // usa SampleLinearDepth con JitterUVDelta = (0,0): buscamos el texel de menor
+    // profundidad en la rejilla de pantalla real, no en la posicion compensada.
+    // Esto es correcto porque el barrido determina que TEXEL de SceneColor
+    // muestrear (una decision de UI/estetica), no una medida geometrica.
+    // Solo el detector Sobel necesita compensacion (medida estable de discontinuidades).
     // =========================================================================
-
     float BlendFactor = saturate(CombinedScore / max(EdgeThreshold, 1e-4f));
-    float4 FinalColor = CentroidColor;   // valor por defecto: interior puro
+    float4 FinalColor = CentroidColor;
 
     [branch]
     if (BlendFactor > 0.01f)
     {
-        // ---------------------------------------------------------------
-        // Barrido del bloque: texel con menor profundidad lineal.
-        //
-        // iBlockOrigin: esquina superior-izquierda del bloque en coordenadas
-        // locales al viewport (0-based, sin el offset ViewRect.xy).
-        // PixelSize es float (CVar), se trunca a int para los limites del bucle.
-        // ---------------------------------------------------------------
         int  iPixelSize    = max(1, int(PixelSize));
         int2 iBlockOrigin  = int2(BlockIndex) * iPixelSize;
         int2 VPMin         = int2(ViewRect.xy);
@@ -487,7 +396,7 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
                                   ViewRect.y + ViewRect.w - 1);
 
         float MinD         = 1.0e38f;
-        int2  NearestLocal = iBlockOrigin;   // se sobreescribira en la primera iteracion valida
+        int2  NearestLocal = iBlockOrigin;
 
         [loop]
         for (int by = 0; by < iPixelSize; by++)
@@ -495,13 +404,11 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
             [loop]
             for (int bx = 0; bx < iPixelSize; bx++)
             {
-                // Coordenada local al viewport (0-based).
                 int2 LocalCoord  = iBlockOrigin + int2(bx, by);
-                // Coordenada en el render target; clamp al viewport para
-                // bloques en el perimetro del viewport.
                 int2 ScreenCoord = clamp(LocalCoord + int2(ViewRect.xy), VPMin, VPMax);
-
-                float D = SampleLinearDepth(ScreenCoord);
+                // Barrido de profundidad sin compensacion de jitter: queremos el texel
+                // mas proximo en la rejilla de pantalla actual, no el neutral-geometrico.
+                float D = SampleLinearDepth(ScreenCoord, float2(0.0f, 0.0f));
                 if (D < MinD)
                 {
                     MinD         = D;
@@ -510,8 +417,6 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
             }
         }
 
-        // UV del texel mas cercano, usando el mismo sistema de coordenadas
-        // que QuantizedUV en PASO 1 (centro del texel: +0.5 antes de escalar).
         float2 NearestUV    = (float2(NearestLocal + int2(ViewRect.xy)) + 0.5f)
                               * InverseViewSize;
         float4 NearestColor = SceneColor.SampleLevel(LinearClampSampler, NearestUV, 0.0f);
