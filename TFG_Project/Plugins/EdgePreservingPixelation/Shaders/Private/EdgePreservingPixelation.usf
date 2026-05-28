@@ -4,24 +4,22 @@
 //         cada una evaluada con el test min(Dev2, Jump) por eje:
 //
 //   Test min(Dev2, Jump) para un par de vecinos opuestos (A, Centro, B):
-//     Dev2 = |2*C - A - B|  (diferencia de segundo orden: cero en rampas lineales)
-//     Jump = |A - B|        (diferencia de primer orden: cero en curvatura simetrica)
-//     Score = min(Dev2, Jump)
+//     Dev2 = |2*C - A - B|  (segundo orden: cero en rampas lineales)
+//     Jump = |A - B|        (primer orden: cero en curvatura simetrica)
+//     Score = min(Dev2, Jump): alto solo para escalones geometricos reales.
 //
-//     Caso ramp/pendiente plana: A = C-k, B = C+k → Dev2=0, min=0.
-//     Caso curvatura simetrica: A = C-k, B = C-k → Jump=0, min=0.
-//     Caso escalon real: un lado muy distinto del otro → ambos grandes, min grande.
+//   Senal 1: Profundidad lineal (SceneDepth), 4 ejes H/V/D1/D2.
+//   Senal 2: Normal del GBuffer (GBufferA.rgb), misma logica vectorial.
+//   Fusion:  CombinedScore = DepthWeight * Score1 + NormalWeight * Score2.
 //
-//   Senal 1 — Profundidad lineal (SceneDepth): 4 ejes H/V/D1/D2, max de los scores.
-//     Normalizado por la profundidad minima del vecindario (invariante a distancia,
-//     sin dilucion por el fondo lejano).
+// Fase 3b: Mezcla adaptativa consciente de profundidad.
+//   La rejilla de bloques es UNIFORME (mismo PixelSize en todas partes).
+//   En bloques de borde, el punto de muestreo dentro del bloque cambia al texel
+//   de menor profundidad lineal (superficie en primer plano).
+//   Transicion continua: Color = lerp(Centroide, MasCercano, BlendFactor)
+//   donde BlendFactor = saturate(CombinedScore / EdgeThreshold).
 //
-//   Senal 2 — Normal del GBuffer (GBufferA.rgb): misma logica vectorial, media de canales.
-//
-//   Fusion: CombinedScore = DepthWeight * Score1 + NormalWeight * Score2 > EdgeThreshold.
-//
-//         Modo debug (EPP.DebugMode 1): bordes en blanco sobre negro para verificacion aislada.
-//         La mezcla adaptativa borde/centroide se implementara en Fase 4.
+//         Modo debug (EPP.DebugMode 1): bordes en blanco sobre negro, sin mezcla.
 //
 // Compatible con UE5 5.5, Shader Model 5+ (D3D12 / Vulkan).
 // Punto de entrada del Compute Shader: MainCS.
@@ -368,42 +366,48 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     float2 QuantizedUV        = (CentroidScreen + 0.5f) * InverseViewSize;
 
     // SampleLevel con LOD 0 explicito: ddx/ddy no estan disponibles en compute shaders.
-    float4 PixelatedColor = SceneColor.SampleLevel(LinearClampSampler, QuantizedUV, 0.0f);
+    // CentroidColor es el color base de pixelacion; se usa directamente en interiores
+    // y como punto de partida del lerp en bloques de borde (PASO 3b).
+    float4 CentroidColor = SceneColor.SampleLevel(LinearClampSampler, QuantizedUV, 0.0f);
 
     // =========================================================================
-    // PASO 2 — Deteccion de bordes geometricos via puntuacion combinada
+    // PASO 2 — Deteccion de bordes geometricos a nivel de BLOQUE
     //
-    // Cada pixel se clasifica independientemente del bloque de pixelacion al que
-    // pertenezca. La clasificacion se usara en Fase 4 para la mezcla adaptativa.
+    // INVARIANTE DE REJILLA: toda la evaluacion de borde — muestreo de profundidad,
+    // muestreo de normal, los kernels de planaridad/normal, CombinedScore y BlendFactor —
+    // se realiza UNA SOLA VEZ por bloque, en el texel del CENTROIDE del bloque.
     //
-    // Senal 1 — Desviacion de planaridad de profundidad (segundo orden):
-    //   Evalua si la profundidad del pixel central es predecible interpolando vecinos
-    //   opuestos. Una pendiente plana → desviacion ~0. Un escalon real → desviacion alta.
-    //   Normalizada por la profundidad minima del vecindario 3×3 (no la del centro):
-    //   invariante a distancia de camara, sin dilucion por el fondo lejano en bordes
-    //   donde el pixel central cae en la superficie distante.
+    // Por que: distintos pixeles dentro del mismo bloque deben producir el mismo
+    // color final. Si el score se evaluase en la UV propia de cada pixel, distintos
+    // pixeles del bloque obtendrian distintos BlendFactor → colores distintos dentro
+    // del bloque → el bloque se fragmenta y filtra detalle sub-bloque. Eso rompe
+    // la estetica pixel-art (rejilla uniforme de bloques monocromaticos).
     //
-    // Senal 2 — Sobel de primer orden sobre normal del GBuffer (GBufferA.rgb):
-    //   Una superficie plana oblicua tiene normal constante → gradiente ~0. Una arista
-    //   real entre dos superficies de distinta orientacion → gradiente elevado.
+    // Todos los pixeles del mismo bloque comparten la misma CentroidScreen, por lo
+    // que todos evaluaran exactamente el mismo score y obtendran el mismo color final.
     //
-    // Fusion: CombinedScore = DepthWeight * DesvPlanaridad + NormalWeight * GradNormal
-    //   Un borde fuerte en cualquiera de las dos senales supera EdgeThreshold.
-    //   Un suelo oblicuo: DesvPlanaridad≈0 (plano lineal) y GradNormal≈0 (normal constante)
-    //   → CombinedScore pequeno → no se detecta como borde.
+    // Senal 1 — min(Dev2, Jump) sobre profundidad lineal (SceneDepth):
+    //   Cero en rampas lineales y curvatura simetrica; alto en escalones reales.
+    //   Normalizado por la profundidad minima del vecindario 3×3 del centroide.
+    //
+    // Senal 2 — min(Dev2, Jump) vectorial sobre normal del GBuffer (GBufferA.rgb):
+    //   Cero en superficies planas y curvatura suave; alto en aristas bruscas.
+    //
+    // Fusion: CombinedScore = DepthWeight * Score1 + NormalWeight * Score2.
+    //   bIsEdge (umbral binario) solo se usa en modo debug.
     // =========================================================================
 
-    // --- Senal 1: puntuacion de borde de profundidad ---
-    // min(Dev2, Jump) por eje sobre profundidad lineal, normalizado por MinDepth.
-    // Suprime rampas (Dev2=0) y curvatura simetrica (Jump=0). Solo escalones reales
-    // producen un score alto. El valor devuelto ya es adimensional.
+    // Coordenada entera del centroide del bloque en el render target.
+    // Es la misma referencia espacial que QuantizedUV, pero en pixeles enteros.
+    // Todos los pixeles del bloque comparten este valor → score uniforme por bloque.
+    int2 BlockCentroidCoord = int2(CentroidScreen);
+
+    // --- Senal 1: puntuacion de borde de profundidad (evaluada en el centroide) ---
     float MinNeighborDepth;
-    float RelativeDepthDev = ComputeDepthEdgeScore(int2(PixelCoord), MinNeighborDepth);
+    float RelativeDepthDev = ComputeDepthEdgeScore(BlockCentroidCoord, MinNeighborDepth);
 
-    // --- Senal 2: puntuacion de borde de normal ---
-    // min(Dev2, Jump) vectorial sobre GBufferA.rgb. Suprime curvatura suave de esferas
-    // y objetos redondeados; detecta aristas reales y transiciones bruscas de normal.
-    float NormalGrad = ComputeNormalEdgeScore(int2(PixelCoord));
+    // --- Senal 2: puntuacion de borde de normal (evaluada en el centroide) ---
+    float NormalGrad = ComputeNormalEdgeScore(BlockCentroidCoord);
 
     // --- Puntuacion combinada y clasificacion binaria ---
     // La suma ponderada integra ambas senales sin exigir que las dos sean fuertes.
@@ -415,8 +419,8 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     //
     // Muestra la clasificacion binaria bIsEdge: blanco = borde, negro = interior.
     // Permite ajustar EPP.EdgeThreshold, EPP.DepthWeight y EPP.NormalWeight en
-    // tiempo real e inspeccionar el resultado antes de integrar la mezcla adaptativa
-    // de Fase 4. Ignora completamente la pixelacion.
+    // tiempo real e inspeccionar el resultado del detector de bordes de forma aislada.
+    // Ignora completamente la pixelacion y la mezcla adaptativa del PASO 3b.
     // Activo via consola: EPP.DebugMode 1
     // =========================================================================
     if (DebugMode >= 0.5f)
@@ -427,11 +431,93 @@ void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
     }
 
     // =========================================================================
-    // SALIDA NORMAL — Pixelacion (sin mezcla de bordes hasta Fase 4)
+    // PASO 3b — Mezcla adaptativa consciente de profundidad
     //
-    // bIsEdge esta disponible para la mezcla adaptativa de Fase 4:
-    //   bIsEdge=true  → mostrar color real del pixel (preservar el borde).
-    //   bIsEdge=false → mostrar color del centroide del bloque (pixelacion normal).
+    // La rejilla permanece UNIFORME: todos los bloques tienen el mismo tamanno
+    // PixelSize. Lo que cambia en los bloques de borde es el PUNTO DE MUESTREO
+    // dentro del bloque:
+    //
+    //   Bloque interior (CombinedScore bajo):
+    //     Muestrea el centroide geometrico del bloque → CentroidColor.
+    //     Comportamiento identico al de Fase 2.
+    //
+    //   Bloque de borde (CombinedScore alto):
+    //     Barre todos los texeles del bloque, identifica el de menor profundidad
+    //     lineal (la superficie en primer plano) y muestrea SceneColor en ese
+    //     punto. El bloque "se compromete" con el objeto mas cercano, en lugar
+    //     de promediar primer plano y fondo como haria el centroide.
+    //
+    // Transicion continua mediante lerp:
+    //   BlendFactor = saturate(CombinedScore / max(EdgeThreshold, 1e-4))
+    //   FinalColor  = lerp(CentroidColor, NearestColor, BlendFactor)
+    //
+    // BlendFactor = 0 en interiores puros (CombinedScore = 0).
+    // BlendFactor = 1 en bordes fuertes (CombinedScore >= EdgeThreshold).
+    // La rampa lineal entre ambos extremos evita el popping abrupto cuando un
+    // bloque cruza el umbral entre frames.
+    //
+    // Como CombinedScore se evalua en el centroide del bloque (PASO 2), BlendFactor
+    // es CONSTANTE dentro del bloque. Todos sus pixeles ejecutan el mismo lerp con
+    // los mismos terminos → producen el mismo color final → la rejilla es uniforme.
+    //
+    // Optimizacion [branch]: el barrido del bloque (O(PixelSize²) lecturas de
+    // profundidad) se omite cuando BlendFactor < 0.01, es decir, para todos
+    // los pixels de interior donde la contribucion de NearestColor es < 1%.
+    // La coherencia espacial de los bloques hace que la rama sea mayormente
+    // uniforme a nivel de warp, minimizando la divergencia.
     // =========================================================================
-    OutputTexture[PixelCoord] = PixelatedColor;
+
+    float BlendFactor = saturate(CombinedScore / max(EdgeThreshold, 1e-4f));
+    float4 FinalColor = CentroidColor;   // valor por defecto: interior puro
+
+    [branch]
+    if (BlendFactor > 0.01f)
+    {
+        // ---------------------------------------------------------------
+        // Barrido del bloque: texel con menor profundidad lineal.
+        //
+        // iBlockOrigin: esquina superior-izquierda del bloque en coordenadas
+        // locales al viewport (0-based, sin el offset ViewRect.xy).
+        // PixelSize es float (CVar), se trunca a int para los limites del bucle.
+        // ---------------------------------------------------------------
+        int  iPixelSize    = max(1, int(PixelSize));
+        int2 iBlockOrigin  = int2(BlockIndex) * iPixelSize;
+        int2 VPMin         = int2(ViewRect.xy);
+        int2 VPMax         = int2(ViewRect.x + ViewRect.z - 1,
+                                  ViewRect.y + ViewRect.w - 1);
+
+        float MinD         = 1.0e38f;
+        int2  NearestLocal = iBlockOrigin;   // se sobreescribira en la primera iteracion valida
+
+        [loop]
+        for (int by = 0; by < iPixelSize; by++)
+        {
+            [loop]
+            for (int bx = 0; bx < iPixelSize; bx++)
+            {
+                // Coordenada local al viewport (0-based).
+                int2 LocalCoord  = iBlockOrigin + int2(bx, by);
+                // Coordenada en el render target; clamp al viewport para
+                // bloques en el perimetro del viewport.
+                int2 ScreenCoord = clamp(LocalCoord + int2(ViewRect.xy), VPMin, VPMax);
+
+                float D = SampleLinearDepth(ScreenCoord);
+                if (D < MinD)
+                {
+                    MinD         = D;
+                    NearestLocal = LocalCoord;
+                }
+            }
+        }
+
+        // UV del texel mas cercano, usando el mismo sistema de coordenadas
+        // que QuantizedUV en PASO 1 (centro del texel: +0.5 antes de escalar).
+        float2 NearestUV    = (float2(NearestLocal + int2(ViewRect.xy)) + 0.5f)
+                              * InverseViewSize;
+        float4 NearestColor = SceneColor.SampleLevel(LinearClampSampler, NearestUV, 0.0f);
+
+        FinalColor = lerp(CentroidColor, NearestColor, BlendFactor);
+    }
+
+    OutputTexture[PixelCoord] = FinalColor;
 }
