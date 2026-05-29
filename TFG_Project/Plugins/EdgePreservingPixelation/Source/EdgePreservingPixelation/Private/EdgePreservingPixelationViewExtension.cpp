@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Manuel. Todos los derechos reservados.
+// Copyright (c) 2025 Manuel Rodríguez Sánchez. Todos los derechos reservados.
 // TFG: Plugin de pixelacion con preservacion de bordes — Implementacion del View Extension.
 
 #include "EdgePreservingPixelationViewExtension.h"

@@ -1,4 +1,4 @@
-// Copyright (c) 2025 Manuel. Todos los derechos reservados.
+// Copyright (c) 2025 Manuel Rodríguez Sánchez. Todos los derechos reservados.
 // TFG: Plugin de pixelacion con preservacion de bordes — Registro del Global Shader.
 
 #include "EdgePreservingPixelationShader.h"

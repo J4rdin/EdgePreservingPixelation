@@ -1,3 +1,5 @@
+// Copyright (c) 2025 Manuel Rodríguez Sánchez. Todos los derechos reservados.
+// TFG: Plugin de pixelación con preservación de bordes.
 // EdgePreservingPixelation.usf
 // TFG: Pipeline de pixelacion en tiempo real con preservacion de bordes.
 // Fase 3: Deteccion de bordes geometricos via puntuacion combinada de dos senales,

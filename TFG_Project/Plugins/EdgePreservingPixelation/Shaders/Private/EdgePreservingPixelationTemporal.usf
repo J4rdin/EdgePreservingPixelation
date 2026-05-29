@@ -1,3 +1,5 @@
+// Copyright (c) 2025 Manuel Rodríguez Sánchez. Todos los derechos reservados.
+// TFG: Plugin de pixelación con preservación de bordes.
 // EdgePreservingPixelationTemporal.usf
 // TFG: Estabilizacion temporal — Paso 3: EMA + reproyeccion velocity + neighborhood clamping YCoCg.
 //
