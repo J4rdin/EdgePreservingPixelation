@@ -7,6 +7,7 @@
 #include "Misc/Paths.h"
 #include "Misc/CoreDelegates.h"
 #include "ShaderCore.h"
+#include "Modules/ModuleManager.h"
 
 #define LOCTEXT_NAMESPACE "FEdgePreservingPixelationModule"
 
