@@ -11,6 +11,12 @@
 
 #define LOCTEXT_NAMESPACE "FEdgePreservingPixelationModule"
 
+/// <summary>
+/// Class: FEdgePreservingPixelationModule
+/// Description: Registra el directorio virtual de shaders y difiere la creación del view extension a OnPostEngineInit.
+/// Author: Manuel Rodríguez Sánchez
+/// Project: TFG - Plugin de pixelación con preservación de bordes
+/// </summary>
 void FEdgePreservingPixelationModule::StartupModule()
 {
     // 1. Registrar el directorio virtual de shaders del plugin.
@@ -30,6 +36,12 @@ void FEdgePreservingPixelationModule::StartupModule()
         this, &FEdgePreservingPixelationModule::OnPostEngineInit);
 }
 
+/// <summary>
+/// Class: FEdgePreservingPixelationModule
+/// Description: Instancia FEdgePreservingPixelationViewExtension una vez que GEngine está completamente inicializado.
+/// Author: Manuel Rodríguez Sánchez
+/// Project: TFG - Plugin de pixelación con preservación de bordes
+/// </summary>
 void FEdgePreservingPixelationModule::OnPostEngineInit()
 {
     // GEngine está completamente inicializado aquí.
@@ -39,6 +51,12 @@ void FEdgePreservingPixelationModule::OnPostEngineInit()
     ViewExtension = FSceneViewExtensions::NewExtension<FEdgePreservingPixelationViewExtension>();
 }
 
+/// <summary>
+/// Class: FEdgePreservingPixelationModule
+/// Description: Desvincula delegates y libera el view extension para desregistrarlo del sistema de vistas.
+/// Author: Manuel Rodríguez Sánchez
+/// Project: TFG - Plugin de pixelación con preservación de bordes
+/// </summary>
 void FEdgePreservingPixelationModule::ShutdownModule()
 {
     // Desvincular el delegate por si ShutdownModule se ejecuta antes de OnPostEngineInit

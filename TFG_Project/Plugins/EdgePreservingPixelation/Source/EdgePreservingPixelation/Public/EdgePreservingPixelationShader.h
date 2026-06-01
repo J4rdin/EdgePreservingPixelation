@@ -14,6 +14,12 @@
 #include "SceneView.h"                // FViewUniformShaderParameters — necesario para SHADER_PARAMETER_STRUCT_REF
 #include "SceneTexturesConfig.h"      // FSceneTextureUniformParameters — UB con SceneDepth real (SHADER_PARAMETER_RDG_UNIFORM_BUFFER)
 
+/// <summary>
+/// Class: FEdgePreservingPixelationCS
+/// Description: Compute Shader global para pixelación en tiempo real con preservación de bordes geométricos.
+/// Author: Manuel Rodríguez Sánchez
+/// Project: TFG - Plugin de pixelación con preservación de bordes
+/// </summary>
 /**
  * FEdgePreservingPixelationCS
  *
@@ -32,6 +38,12 @@ public:
     DECLARE_GLOBAL_SHADER(FEdgePreservingPixelationCS);
     SHADER_USE_PARAMETER_STRUCT(FEdgePreservingPixelationCS, FGlobalShader);
 
+    /// <summary>
+    /// Class: FEdgePreservingPixelationCS::FParameters
+    /// Description: Estructura de parámetros RDG del shader principal; define recursos de entrada/salida y layout del constant buffer.
+    /// Author: Manuel Rodríguez Sánchez
+    /// Project: TFG - Plugin de pixelación con preservación de bordes
+    /// </summary>
     /**
      * FParameters
      *
@@ -156,6 +168,12 @@ public:
 
     END_SHADER_PARAMETER_STRUCT()
 
+    /// <summary>
+    /// Class: FEdgePreservingPixelationCS
+    /// Description: Restringe la compilación del shader a plataformas con Shader Model 5 o superior.
+    /// Author: Manuel Rodríguez Sánchez
+    /// Project: TFG - Plugin de pixelación con preservación de bordes
+    /// </summary>
     /**
      * ShouldCompilePermutation
      * Restringe la compilacion del shader a plataformas con Shader Model 5 o superior,
@@ -166,6 +184,12 @@ public:
         return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
     }
 
+    /// <summary>
+    /// Class: FEdgePreservingPixelationCS
+    /// Description: Inyecta los defines THREADGROUP_SIZE_X/Y=8 en el entorno de compilación del shader principal.
+    /// Author: Manuel Rodríguez Sánchez
+    /// Project: TFG - Plugin de pixelación con preservación de bordes
+    /// </summary>
     /**
      * ModifyCompilationEnvironment
      * Inyecta defines de preprocesador en el entorno de compilacion del shader.
@@ -182,6 +206,12 @@ public:
     }
 };
 
+/// <summary>
+/// Class: FEdgePreservingPixelationTemporalCS
+/// Description: Compute Shader de estabilización temporal EMA con reprojección por velocidad y YCoCg neighbourhood clamping.
+/// Author: Manuel Rodríguez Sánchez
+/// Project: TFG - Plugin de pixelación con preservación de bordes
+/// </summary>
 /**
  * FEdgePreservingPixelationTemporalCS
  *
@@ -205,6 +235,12 @@ public:
     DECLARE_GLOBAL_SHADER(FEdgePreservingPixelationTemporalCS);
     SHADER_USE_PARAMETER_STRUCT(FEdgePreservingPixelationTemporalCS, FGlobalShader);
 
+    /// <summary>
+    /// Class: FEdgePreservingPixelationTemporalCS::FParameters
+    /// Description: Estructura de parámetros RDG del shader temporal; define historia, frame actual y layout del constant buffer.
+    /// Author: Manuel Rodríguez Sánchez
+    /// Project: TFG - Plugin de pixelación con preservación de bordes
+    /// </summary>
     /**
      * FParameters
      *
@@ -245,11 +281,25 @@ public:
 
     END_SHADER_PARAMETER_STRUCT()
 
+    /// <summary>
+    /// Class: FEdgePreservingPixelationTemporalCS
+    /// Description: Restringe la compilación del shader temporal a plataformas con Shader Model 5 o superior.
+    /// Author: Manuel Rodríguez Sánchez
+    /// Project: TFG - Plugin de pixelación con preservación de bordes
+    /// </summary>
+    /** @brief Restringe la compilación a plataformas con Shader Model 5 o superior, requisito de compute shaders con UAV. */
     static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
     {
         return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM5);
     }
 
+    /// <summary>
+    /// Class: FEdgePreservingPixelationTemporalCS
+    /// Description: Inyecta los defines THREADGROUP_SIZE_X/Y=8 en el entorno de compilación del shader temporal.
+    /// Author: Manuel Rodríguez Sánchez
+    /// Project: TFG - Plugin de pixelación con preservación de bordes
+    /// </summary>
+    /** @brief Inyecta los defines THREADGROUP_SIZE_X/Y=8 en el entorno de compilación del shader temporal. */
     static void ModifyCompilationEnvironment(
         const FGlobalShaderPermutationParameters& Parameters,
         FShaderCompilerEnvironment& OutEnvironment)

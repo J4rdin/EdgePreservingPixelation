@@ -16,6 +16,12 @@
 struct FScreenPassTexture;
 struct FPostProcessMaterialInputs;
 
+/// <summary>
+/// Class: FEdgePreservingPixelationViewExtension
+/// Description: Extensión de vista que inyecta el pase de compute de pixelación tras el Tonemap del pipeline de post-procesado.
+/// Author: Manuel Rodríguez Sánchez
+/// Project: TFG - Plugin de pixelación con preservación de bordes
+/// </summary>
 /**
  * FEdgePreservingPixelationViewExtension
  *
@@ -46,13 +52,47 @@ class EDGEPRESERVINGPIXELATION_API FEdgePreservingPixelationViewExtension
     : public FSceneViewExtensionBase
 {
 public:
+    /// <summary>
+    /// Class: FEdgePreservingPixelationViewExtension
+    /// Description: Inicializa la extensión y la registra en el sistema de vistas de UE5 mediante FAutoRegister.
+    /// Author: Manuel Rodríguez Sánchez
+    /// Project: TFG - Plugin de pixelación con preservación de bordes
+    /// </summary>
+    /** @brief Inicializa la extensión y la registra automáticamente en el sistema de vistas de UE5 mediante FAutoRegister. */
     FEdgePreservingPixelationViewExtension(const FAutoRegister& AutoRegister);
 
     // ISceneViewExtension — implementaciones vacías requeridas por la interfaz.
+    /// <summary>
+    /// Class: FEdgePreservingPixelationViewExtension
+    /// Description: Sin uso; implementación vacía requerida por ISceneViewExtension.
+    /// Author: Manuel Rodríguez Sánchez
+    /// Project: TFG - Plugin de pixelación con preservación de bordes
+    /// </summary>
+    /** @brief Sin uso; implementación vacía requerida por ISceneViewExtension. */
     virtual void SetupViewFamily(FSceneViewFamily& InViewFamily) override {}
+    /// <summary>
+    /// Class: FEdgePreservingPixelationViewExtension
+    /// Description: Sin uso; implementación vacía requerida por ISceneViewExtension.
+    /// Author: Manuel Rodríguez Sánchez
+    /// Project: TFG - Plugin de pixelación con preservación de bordes
+    /// </summary>
+    /** @brief Sin uso; implementación vacía requerida por ISceneViewExtension. */
     virtual void SetupView(FSceneViewFamily& ViewFamily, FSceneView& View) override {}
+    /// <summary>
+    /// Class: FEdgePreservingPixelationViewExtension
+    /// Description: Sin uso; implementación vacía requerida por ISceneViewExtension.
+    /// Author: Manuel Rodríguez Sánchez
+    /// Project: TFG - Plugin de pixelación con preservación de bordes
+    /// </summary>
+    /** @brief Sin uso; implementación vacía requerida por ISceneViewExtension. */
     virtual void BeginRenderViewFamily(FSceneViewFamily& InViewFamily) override {}
 
+    /// <summary>
+    /// Class: FEdgePreservingPixelationViewExtension
+    /// Description: Registra el callback de pixelación para el pase Tonemap del post-procesado de UE5.
+    /// Author: Manuel Rodríguez Sánchez
+    /// Project: TFG - Plugin de pixelación con preservación de bordes
+    /// </summary>
     /**
      * SubscribeToPostProcessingPass
      *
@@ -73,6 +113,12 @@ public:
         bool bIsPassEnabled) override;
 
 private:
+    /// <summary>
+    /// Class: FEdgePreservingPixelationViewExtension
+    /// Description: Callback del render thread que despacha el compute shader de pixelación y el pase EMA temporal vía RDG.
+    /// Author: Manuel Rodríguez Sánchez
+    /// Project: TFG - Plugin de pixelación con preservación de bordes
+    /// </summary>
     /**
      * PostProcessPass_RenderThread
      *
@@ -109,9 +155,9 @@ private:
     // (split-screen) el historial se compartiria incorrectamente; se puede extender
     // indexando por FSceneViewState si fuera necesario en el futuro.
     // -----------------------------------------------------------------------
-    TRefCountPtr<IPooledRenderTarget> HistoryRT[2];
-    int32        HistoryReadIndex = 0;
-    bool         bHistoryValid    = false;
-    FIntPoint    HistorySize      = FIntPoint::ZeroValue;
-    EPixelFormat HistoryFormat    = PF_Unknown;
+    TRefCountPtr<IPooledRenderTarget> HistoryRT[2];      ///< Par de buffers de historia ping-pong; HistoryRT[HistoryReadIndex] contiene el frame anterior.
+    int32        HistoryReadIndex = 0;                   ///< Índice del buffer de historia de lectura (0 ó 1); alterna en cada frame tras QueueTextureExtraction.
+    bool         bHistoryValid    = false;               ///< Indica si el historial contiene datos válidos del frame anterior; false en el primer frame.
+    FIntPoint    HistorySize      = FIntPoint::ZeroValue; ///< Resolución de los buffers de historia; un cambio invalida el historial.
+    EPixelFormat HistoryFormat    = PF_Unknown;          ///< Formato de píxel de los buffers de historia; un cambio invalida el historial.
 };

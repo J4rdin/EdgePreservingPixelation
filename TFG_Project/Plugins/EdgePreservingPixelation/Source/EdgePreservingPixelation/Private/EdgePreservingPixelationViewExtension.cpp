@@ -15,6 +15,7 @@
 // Variable de consola para controlar el tamaño del bloque de pixelación en tiempo de ejecución.
 // ECVF_RenderThreadSafe permite leer el valor de forma segura desde el render thread.
 // Uso en consola: EPP.PixelSize 4  (o 8, 16, etc.)
+/** @brief Tamaño del bloque de pixelación en píxeles de pantalla; mínimo efectivo 2 (EPP.PixelSize). */
 static TAutoConsoleVariable<float> CVarEPPPixelSize(
     TEXT("EPP.PixelSize"),
     8.0f,
@@ -26,6 +27,7 @@ static TAutoConsoleVariable<float> CVarEPPPixelSize(
 // Se compara contra (GradienteSobel / ProfundidadLinealCentral), valor adimensional
 // e invariante a la distancia de camara. Rango util: [0.01, 0.5].
 // Uso: EPP.EdgeThreshold 0.05
+/** @brief Umbral sobre la puntuación combinada de borde (DepthWeight·GradDepth + NormalWeight·GradNormal); rango útil [0.02, 0.5] (EPP.EdgeThreshold). */
 static TAutoConsoleVariable<float> CVarEPPEdgeThreshold(
     TEXT("EPP.EdgeThreshold"),
     0.05f,
@@ -38,6 +40,7 @@ static TAutoConsoleVariable<float> CVarEPPEdgeThreshold(
 // Modo de debug del detector de bordes.
 // 0 = salida normal (pixelacion); 1 = bordes en blanco sobre negro.
 // Uso: EPP.DebugMode 1
+/** @brief Modo de salida del shader: 0 = pixelación normal, 1 = bordes en blanco sobre negro (visualización Sobel aislada) (EPP.DebugMode). */
 static TAutoConsoleVariable<int32> CVarEPPDebugMode(
     TEXT("EPP.DebugMode"),
     0,
@@ -52,6 +55,7 @@ static TAutoConsoleVariable<int32> CVarEPPDebugMode(
 // Un borde visible en cualquiera de las dos senales puede superar EdgeThreshold;
 // una superficie plana oblicua (debil en ambas) se descarta.
 // Uso: EPP.DepthWeight 1.0
+/** @brief Peso del gradiente Sobel de profundidad relativa en la puntuación combinada; valor 0 desactiva la contribución de profundidad (EPP.DepthWeight). */
 static TAutoConsoleVariable<float> CVarEPPDepthWeight(
     TEXT("EPP.DepthWeight"),
     1.0f,
@@ -63,6 +67,7 @@ static TAutoConsoleVariable<float> CVarEPPDepthWeight(
 // Peso del gradiente Sobel de normal del GBuffer (GBufferA) en la puntuacion combinada.
 // Permite detectar esquinas y cambios de superficie sin discontinuidad de profundidad.
 // Uso: EPP.NormalWeight 1.0
+/** @brief Peso del gradiente Sobel de normal del GBuffer en la puntuación combinada; valor 0 desactiva la contribución de normal (EPP.NormalWeight). */
 static TAutoConsoleVariable<float> CVarEPPNormalWeight(
     TEXT("EPP.NormalWeight"),
     1.0f,
@@ -76,6 +81,7 @@ static TAutoConsoleVariable<float> CVarEPPNormalWeight(
 // en la configuracion final del TFG (FXAA, sin jitter activo). Se conserva expuesto como
 // parametro de ablacion para la comparativa A/B de la memoria academica.
 // Uso: EPP.JitterCompensation 1  (activa el offset round()+Load por View.TemporalAAJitter)
+/** @brief Compensa el jitter sub-píxel de TAA en el detector Sobel; 1 = activo, 0 = desactivado — parámetro de ablación A/B del TFG (EPP.JitterCompensation). */
 static TAutoConsoleVariable<int32> CVarEPPJitterCompensation(
     TEXT("EPP.JitterCompensation"),
     0,
@@ -89,6 +95,7 @@ static TAutoConsoleVariable<int32> CVarEPPJitterCompensation(
 // 0 = desactivado (pixelacion pura, Fases 1-3b — util para comparar en ablacion).
 // 1 = activo (Paso 1: EMA ingenua sin reprojeccion).
 // Uso: EPP.EnableTemporal 0
+/** @brief Activa el pase de estabilización temporal EMA (Fase 4); 1 = activo, 0 = desactivado (pixelación pura para ablación) (EPP.EnableTemporal). */
 static TAutoConsoleVariable<int32> CVarEPPEnableTemporal(
     TEXT("EPP.EnableTemporal"),
     1,
@@ -103,6 +110,7 @@ static TAutoConsoleVariable<int32> CVarEPPEnableTemporal(
 // Valores bajos: historia domina, mayor estabilidad pero ghosting mas largo.
 // Valores altos: actual domina, ghosting breve pero menor reduccion de parpadeo.
 // Uso: EPP.TemporalAlpha 0.1
+/** @brief Factor de mezcla EMA: output = lerp(historia, actual, alpha); rango [0,1]; defecto 0.1 (~10 frames de constante de tiempo) (EPP.TemporalAlpha). */
 static TAutoConsoleVariable<float> CVarEPPTemporalAlpha(
     TEXT("EPP.TemporalAlpha"),
     0.1f,
@@ -117,6 +125,12 @@ static TAutoConsoleVariable<float> CVarEPPTemporalAlpha(
 // Constructor
 // ---------------------------------------------------------------------------
 
+/// <summary>
+/// Class: FEdgePreservingPixelationViewExtension
+/// Description: Inicializa la extensión invocando el constructor base FSceneViewExtensionBase con el token de auto-registro.
+/// Author: Manuel Rodríguez Sánchez
+/// Project: TFG - Plugin de pixelación con preservación de bordes
+/// </summary>
 FEdgePreservingPixelationViewExtension::FEdgePreservingPixelationViewExtension(
     const FAutoRegister& AutoRegister)
     : FSceneViewExtensionBase(AutoRegister)
@@ -127,6 +141,12 @@ FEdgePreservingPixelationViewExtension::FEdgePreservingPixelationViewExtension(
 // SubscribeToPostProcessingPass
 // ---------------------------------------------------------------------------
 
+/// <summary>
+/// Class: FEdgePreservingPixelationViewExtension
+/// Description: Registra PostProcessPass_RenderThread como callback para el pase EPostProcessingPass::Tonemap.
+/// Author: Manuel Rodríguez Sánchez
+/// Project: TFG - Plugin de pixelación con preservación de bordes
+/// </summary>
 void FEdgePreservingPixelationViewExtension::SubscribeToPostProcessingPass(
     EPostProcessingPass Pass,
     const FSceneView& InView,
@@ -146,6 +166,12 @@ void FEdgePreservingPixelationViewExtension::SubscribeToPostProcessingPass(
 // PostProcessPass_RenderThread
 // ---------------------------------------------------------------------------
 
+/// <summary>
+/// Class: FEdgePreservingPixelationViewExtension
+/// Description: Despacha el pase de pixelación y el pase EMA temporal vía RDG; devuelve la textura resultante al pipeline.
+/// Author: Manuel Rodríguez Sánchez
+/// Project: TFG - Plugin de pixelación con preservación de bordes
+/// </summary>
 FScreenPassTexture FEdgePreservingPixelationViewExtension::PostProcessPass_RenderThread(
     FRDGBuilder& GraphBuilder,
     const FSceneView& View,

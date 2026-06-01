@@ -12,6 +12,12 @@
 
 class FEdgePreservingPixelationViewExtension;
 
+/// <summary>
+/// Class: FEdgePreservingPixelationModule
+/// Description: Punto de entrada del plugin; registra shaders e instancia la extensión de vista.
+/// Author: Manuel Rodríguez Sánchez
+/// Project: TFG - Plugin de pixelación con preservación de bordes
+/// </summary>
 /**
  * FEdgePreservingPixelationModule
  *
@@ -31,10 +37,30 @@ class FEdgePreservingPixelationViewExtension;
 class EDGEPRESERVINGPIXELATION_API FEdgePreservingPixelationModule : public IModuleInterface
 {
 public:
+    /// <summary>
+    /// Class: FEdgePreservingPixelationModule
+    /// Description: Registra el directorio virtual de shaders e inicia el ciclo de vida del módulo en dos fases.
+    /// Author: Manuel Rodríguez Sánchez
+    /// Project: TFG - Plugin de pixelación con preservación de bordes
+    /// </summary>
+    /** @brief Registra el directorio virtual de shaders e inicia el ciclo de vida del módulo en dos fases (PostConfigInit + OnPostEngineInit). */
     virtual void StartupModule() override;
+    /// <summary>
+    /// Class: FEdgePreservingPixelationModule
+    /// Description: Libera la extensión de vista y desvincula los delegates registrados en StartupModule().
+    /// Author: Manuel Rodríguez Sánchez
+    /// Project: TFG - Plugin de pixelación con preservación de bordes
+    /// </summary>
+    /** @brief Libera la extensión de vista y desvincula los delegates registrados en StartupModule(). */
     virtual void ShutdownModule() override;
 
 private:
+    /// <summary>
+    /// Class: FEdgePreservingPixelationModule
+    /// Description: Callback que instancia el view extension cuando GEngine está completamente inicializado.
+    /// Author: Manuel Rodríguez Sánchez
+    /// Project: TFG - Plugin de pixelación con preservación de bordes
+    /// </summary>
     // Callback vinculado a FCoreDelegates::OnPostEngineInit.
     // Se llama cuando GEngine está completamente inicializado y el sistema de
     // view extensions es operativo.
