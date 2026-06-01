@@ -6,8 +6,6 @@
         "PCH": "c:\\users\\manur\\documents\\github\\tfg_repo\\tfg_project\\intermediate\\build\\win64\\x64\\tfg_projecteditor\\development\\unrealed\\sharedpch.unrealed.project.valapi.cpp20.h.pch",
         "Includes": [
             "c:\\users\\manur\\documents\\github\\tfg_repo\\tfg_project\\plugins\\edgepreservingpixelation\\intermediate\\build\\win64\\x64\\unrealeditor\\development\\edgepreservingpixelation\\definitions.edgepreservingpixelation.h",
-            "c:\\users\\manur\\documents\\github\\tfg_repo\\tfg_project\\plugins\\edgepreservingpixelation\\intermediate\\build\\win64\\x64\\unrealeditor\\development\\edgepreservingpixelation\\permoduleinline.gen.cpp",
-            "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\core\\public\\hal\\permoduleinline.inl",
             "c:\\users\\manur\\documents\\github\\tfg_repo\\tfg_project\\plugins\\edgepreservingpixelation\\source\\edgepreservingpixelation\\private\\edgepreservingpixelationmodule.cpp",
             "c:\\users\\manur\\documents\\github\\tfg_repo\\tfg_project\\plugins\\edgepreservingpixelation\\source\\edgepreservingpixelation\\public\\edgepreservingpixelationmodule.h",
             "c:\\users\\manur\\documents\\github\\tfg_repo\\tfg_project\\plugins\\edgepreservingpixelation\\source\\edgepreservingpixelation\\public\\edgepreservingpixelationviewextension.h",
@@ -43,7 +41,15 @@
             "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\rendercore\\public\\rendergraphtrace.h",
             "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\rendercore\\public\\rendergraphvalidation.h",
             "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\core\\public\\experimental\\containers\\robinhoodhashtable.h",
-            "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\rendercore\\public\\rendergraphbuilder.inl"
+            "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\rendercore\\public\\rendergraphbuilder.inl",
+            "c:\\users\\manur\\documents\\github\\tfg_repo\\tfg_project\\plugins\\edgepreservingpixelation\\source\\edgepreservingpixelation\\private\\edgepreservingpixelationviewextension.cpp",
+            "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\renderer\\public\\screenpass.h",
+            "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\engine\\public\\canvastypes.h",
+            "c:\\program files\\epic games\\ue_5.5\\engine\\intermediate\\build\\win64\\unrealeditor\\inc\\engine\\uht\\canvastypes.generated.h",
+            "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\rendercore\\public\\commonrenderresources.h",
+            "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\renderer\\public\\screenpass.inl",
+            "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\renderer\\public\\postprocess\\postprocessmaterialinputs.h",
+            "c:\\program files\\epic games\\ue_5.5\\engine\\source\\runtime\\renderer\\public\\scenerendertargetparameters.h"
         ],
         "ImportedModules": [],
         "ImportedHeaderUnits": []

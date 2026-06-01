@@ -12,6 +12,7 @@
       <Filter>Source</Filter>
     </None>
     <None Include="..\..\.vsconfig" />
+    <None Include="..\..\AssetsvilleTown.png" />
     <Filter Include="Config">
       <UniqueIdentifier>{FA535FFB-25E1-3D20-B416-52F9BE21E06E}</UniqueIdentifier>
     </Filter>
@@ -54,6 +55,9 @@
     <ClCompile Include="..\..\Plugins\EdgePreservingPixelation\Source\EdgePreservingPixelation\Private\EdgePreservingPixelationShader.cpp">
       <Filter>Plugins\EdgePreservingPixelation\Source\EdgePreservingPixelation\Private</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\Plugins\EdgePreservingPixelation\Source\EdgePreservingPixelation\Private\EdgePreservingPixelationViewExtension.cpp">
+      <Filter>Plugins\EdgePreservingPixelation\Source\EdgePreservingPixelation\Private</Filter>
+    </ClCompile>
     <Filter Include="Plugins\EdgePreservingPixelation\Source\EdgePreservingPixelation\Public">
       <UniqueIdentifier>{30440DFE-6894-3476-BFA3-920A2F35217F}</UniqueIdentifier>
     </Filter>
@@ -61,6 +65,9 @@
       <Filter>Plugins\EdgePreservingPixelation\Source\EdgePreservingPixelation\Public</Filter>
     </ClCompile>
     <ClCompile Include="..\..\Plugins\EdgePreservingPixelation\Source\EdgePreservingPixelation\Public\EdgePreservingPixelationShader.h">
+      <Filter>Plugins\EdgePreservingPixelation\Source\EdgePreservingPixelation\Public</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Plugins\EdgePreservingPixelation\Source\EdgePreservingPixelation\Public\EdgePreservingPixelationViewExtension.h">
       <Filter>Plugins\EdgePreservingPixelation\Source\EdgePreservingPixelation\Public</Filter>
     </ClCompile>
     <None Include="..\..\Plugins\EdgePreservingPixelation\EdgePreservingPixelation.uplugin">
@@ -73,6 +80,9 @@
       <UniqueIdentifier>{DF503D1C-F8DB-30EC-A51D-FDF678BB487B}</UniqueIdentifier>
     </Filter>
     <None Include="..\..\Plugins\EdgePreservingPixelation\Shaders\Private\EdgePreservingPixelation.usf">
+      <Filter>Plugins\EdgePreservingPixelation\Shaders\Private</Filter>
+    </None>
+    <None Include="..\..\Plugins\EdgePreservingPixelation\Shaders\Private\EdgePreservingPixelationTemporal.usf">
       <Filter>Plugins\EdgePreservingPixelation\Shaders\Private</Filter>
     </None>
     <Filter Include="Source\TFG_Project">

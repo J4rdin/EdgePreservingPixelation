@@ -11,7 +11,7 @@
     </ProjectConfiguration>
   </ItemGroup>
   <PropertyGroup Label="Globals">
-    <ProjectGuid>{0041A6F2-732E-3C3A-B373-95300A85D5E5}</ProjectGuid>
+    <ProjectGuid>{C945F619-B02D-3CFF-ADD3-E672A7C0B4E7}</ProjectGuid>
     <RootNamespace>UE5</RootNamespace>
   </PropertyGroup>
   <Import Project="UECommon.props" />

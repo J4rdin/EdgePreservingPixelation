@@ -2,10 +2,10 @@
 	"RemapUnityFiles": 
 	{
 		"Module.EdgePreservingPixelation.cpp.obj": [
-			"PerModuleInline.gen.cpp.obj",
 			"EdgePreservingPixelationModule.cpp.obj",
 			"EdgePreservingPixelationShader.cpp.obj",
-			"EdgePreservingPixelationViewExtension.cpp.obj"
+			"EdgePreservingPixelationViewExtension.cpp.obj",
+			"PerModuleInline.gen.cpp.obj"
 		]
 	}
 }
